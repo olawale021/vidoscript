@@ -165,8 +165,45 @@ export default defineSchema({
     error: v.union(v.string(), v.null()),
     jobToken: v.union(v.string(), v.null()), // shared secret for worker callbacks
     updatedAt: v.number(),
+    // Timing for capacity stats (set by the worker callbacks).
+    startedAt: v.optional(v.number()),
+    finishedAt: v.optional(v.number()),
+    // Admin load-test copy: shares the source projectId but is never shown to the user.
+    loadTest: v.optional(v.boolean()),
   })
     .index("by_project", ["projectId"])
     .index("by_user", ["userId", "updatedAt"])
     .index("by_status", ["status"]),
+
+  // One row per AI call, for the admin cost dashboard.
+  aiUsage: defineTable({
+    userId: v.string(), // Clerk subject, or "anonymous"
+    provider: v.union(v.literal("openai"), v.literal("gemini")),
+    model: v.string(),
+    feature: v.string(), // e.g. "analyzeTranscript"
+    inputTokens: v.number(),
+    outputTokens: v.number(),
+    audioSeconds: v.optional(v.number()), // Whisper
+    costUsd: v.number(),
+    createdAt: v.number(),
+  })
+    .index("by_created", ["createdAt"])
+    .index("by_user_created", ["userId", "createdAt"]),
+
+  // Server health heartbeats from the render worker (host /proc values).
+  systemStats: defineTable({
+    loadAvg1: v.number(),
+    loadAvg5: v.number(),
+    loadAvg15: v.number(),
+    cpuCount: v.number(),
+    memTotal: v.number(), // bytes
+    memAvailable: v.number(),
+    swapTotal: v.number(),
+    swapFree: v.number(),
+    diskTotal: v.number(),
+    diskFree: v.number(),
+    workerBusy: v.boolean(),
+    currentRenderId: v.optional(v.id("renders")),
+    createdAt: v.number(),
+  }).index("by_created", ["createdAt"]),
 });

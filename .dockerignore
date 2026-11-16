@@ -1,0 +1,14 @@
+node_modules
+.next
+.git
+.env
+.env.*
+!.env.example
+deploy/.env
+deploy/app.env
+*.zip
+.DS_Store
+.claude
+.agents
+docs
+render-worker/out

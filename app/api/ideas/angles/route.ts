@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 import OpenAI from "openai";
+import { trackOpenAI } from "@/lib/ai-usage";
 
 function getOpenAIClient() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -78,6 +79,7 @@ ${sourceText}`,
         },
       ],
     });
+    trackOpenAI(completion, "ideas.angles");
 
     const raw = completion.choices[0]?.message?.content;
     if (!raw) throw new Error("Empty response from the model");

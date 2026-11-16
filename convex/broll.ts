@@ -1,5 +1,16 @@
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { mutation, query, type QueryCtx } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
+
+// The user's own render row for a project. Admin load-test copies share the
+// projectId (loadTest: true) and are skipped so they never reach the UI.
+async function primaryRender(ctx: QueryCtx, projectId: Id<"projects">) {
+  const rows = await ctx.db
+    .query("renders")
+    .withIndex("by_project", (q) => q.eq("projectId", projectId))
+    .collect();
+  return rows.find((r) => !r.loadTest) ?? null;
+}
 
 // ── User-facing (Clerk-auth) ──
 
@@ -13,10 +24,7 @@ export const saveScenePlan = mutation({
     const project = await ctx.db.get(projectId);
     if (!project || project.userId !== identity.subject) throw new Error("Not found");
 
-    const existing = await ctx.db
-      .query("renders")
-      .withIndex("by_project", (q) => q.eq("projectId", projectId))
-      .unique();
+    const existing = await primaryRender(ctx, projectId);
 
     if (existing) {
       await ctx.db.patch(existing._id, { scenePlan, updatedAt: Date.now() });
@@ -42,10 +50,7 @@ export const getByProject = query({
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) return null;
 
-    const render = await ctx.db
-      .query("renders")
-      .withIndex("by_project", (q) => q.eq("projectId", projectId))
-      .unique();
+    const render = await primaryRender(ctx, projectId);
     if (!render || render.userId !== identity.subject) return null;
 
     const outputUrl = render.outputStorageId
@@ -62,16 +67,15 @@ export const enqueueRender = mutation({
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) throw new Error("Unauthorized");
 
-    const render = await ctx.db
-      .query("renders")
-      .withIndex("by_project", (q) => q.eq("projectId", projectId))
-      .unique();
+    const render = await primaryRender(ctx, projectId);
     if (!render || render.userId !== identity.subject) throw new Error("No plan to render");
 
     await ctx.db.patch(render._id, {
       status: "queued",
       progress: 0,
       error: null,
+      startedAt: undefined,
+      finishedAt: undefined,
       updatedAt: Date.now(),
     });
     return render._id;
@@ -80,7 +84,7 @@ export const enqueueRender = mutation({
 
 // ── Worker-facing (shared secret, no Clerk session) ──
 
-function assertWorker(secret: string) {
+export function assertWorker(secret: string) {
   const expected = process.env.BROLL_WORKER_SECRET;
   if (!expected || secret !== expected) throw new Error("Bad worker secret");
 }
@@ -101,7 +105,15 @@ export const markRendering = mutation({
   args: { secret: v.string(), renderId: v.id("renders"), progress: v.number() },
   handler: async (ctx, { secret, renderId, progress }) => {
     assertWorker(secret);
-    await ctx.db.patch(renderId, { status: "rendering", progress, updatedAt: Date.now() });
+    const render = await ctx.db.get(renderId);
+    if (!render) return null;
+    const now = Date.now();
+    await ctx.db.patch(renderId, {
+      status: "rendering",
+      progress,
+      updatedAt: now,
+      ...(render.status !== "rendering" ? { startedAt: now } : {}),
+    });
     return null;
   },
 });
@@ -122,12 +134,14 @@ export const saveOutput = mutation({
   },
   handler: async (ctx, { secret, renderId, storageId }) => {
     assertWorker(secret);
+    const now = Date.now();
     await ctx.db.patch(renderId, {
       status: "done",
       progress: 100,
       outputStorageId: storageId,
       error: null,
-      updatedAt: Date.now(),
+      finishedAt: now,
+      updatedAt: now,
     });
     return null;
   },
@@ -137,7 +151,8 @@ export const markFailed = mutation({
   args: { secret: v.string(), renderId: v.id("renders"), error: v.string() },
   handler: async (ctx, { secret, renderId, error }) => {
     assertWorker(secret);
-    await ctx.db.patch(renderId, { status: "failed", error, updatedAt: Date.now() });
+    const now = Date.now();
+    await ctx.db.patch(renderId, { status: "failed", error, finishedAt: now, updatedAt: now });
     return null;
   },
 });

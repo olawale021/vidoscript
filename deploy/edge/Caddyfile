@@ -1,0 +1,16 @@
+# Each stack's containers join the vidoscript-edge network as <stack>-app and
+# <stack>-backend. Caddy gets HTTPS certificates automatically.
+
+# ---------- prod ----------
+app.vidoscript.app {
+	encode zstd gzip
+	reverse_proxy prod-app:2101
+}
+
+api.vidoscript.app {
+	reverse_proxy prod-backend:3210
+}
+
+site.vidoscript.app {
+	reverse_proxy prod-backend:3211
+}

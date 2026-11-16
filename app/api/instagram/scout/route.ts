@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { getTopPostsAcrossFavorites } from "@/lib/instagram-cache";
+import { trackOpenAI } from "@/lib/ai-usage";
 
 function getOpenAIClient() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -45,6 +46,7 @@ export async function GET(req: NextRequest) {
       ],
       response_format: { type: "json_object" },
     });
+    trackOpenAI(response, "instagram.scout");
 
     const content = response.choices[0].message.content;
     if (!content) throw new Error("No analysis returned");

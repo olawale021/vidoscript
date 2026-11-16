@@ -13,8 +13,11 @@ import {
   Lightbulb,
   PanelLeftClose,
   PanelLeftOpen,
+  Shield,
 } from "lucide-react";
 import { UserButton } from "@clerk/nextjs";
+import { useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
 import { cn } from "@/lib/utils";
 
 const NAV = [
@@ -31,6 +34,10 @@ const STORAGE_KEY = "vidoscript_sidebar_collapsed";
 export function DashboardSidebar() {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
+  const admin = useQuery(api.admin.amIAdmin);
+  const nav = admin
+    ? [...NAV, { href: "/dashboard/admin", icon: Shield, label: "Admin", exact: false }]
+    : NAV;
 
   useEffect(() => {
     setCollapsed(localStorage.getItem(STORAGE_KEY) === "1");
@@ -72,7 +79,7 @@ export function DashboardSidebar() {
 
       {/* Nav */}
       <nav className={cn("flex-1 space-y-1 mt-4", collapsed ? "px-2" : "px-3")}>
-        {NAV.map(({ href, icon: Icon, label, exact }) => {
+        {nav.map(({ href, icon: Icon, label, exact }) => {
           const active = isActive(href, exact);
           return (
             <Link

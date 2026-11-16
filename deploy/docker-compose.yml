@@ -1,0 +1,119 @@
+# One app stack (prod or staging). Caddy lives separately in deploy/edge/.
+#
+#   prod:     docker compose -p vidoscript-prod    --env-file prod.env    up -d --build
+#   staging:  docker compose -p vidoscript-staging --env-file staging.env up -d --build
+#   (or use deploy/stack.sh prod|staging <compose args>)
+#
+# <stack>.env      hosts, passwords, public keys, STACK name, DASHBOARD_PORT
+# <stack>.app.env  server-side API keys (OpenAI, Gemini, Clerk secret, worker secret, ...)
+# Neither file is committed.
+#
+# Only Caddy publishes ports to the internet. Each stack's app and Convex join
+# the shared "vidoscript-edge" network under <stack>-app / <stack>-backend so
+# Caddy can reach them. Docker bypasses ufw, so nothing else is published
+# except the Convex dashboard on localhost.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: convex
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Self-hosted Convex stores its data in a database named after INSTANCE_NAME.
+      POSTGRES_DB: convex_self_hosted
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U convex -d convex_self_hosted"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    image: ghcr.io/convex/convex-backend:${CONVEX_VERSION:-latest}
+    restart: unless-stopped
+    stop_grace_period: 10s
+    stop_signal: SIGINT
+    environment:
+      INSTANCE_NAME: convex_self_hosted
+      INSTANCE_SECRET: ${INSTANCE_SECRET}
+      CONVEX_CLOUD_ORIGIN: https://${API_HOST}
+      CONVEX_SITE_ORIGIN: https://${SITE_HOST}
+      POSTGRES_URL: postgres://convex:${POSTGRES_PASSWORD}@postgres:5432
+      DO_NOT_REQUIRE_SSL: "1"
+      DISABLE_BEACON: "true"
+      RUST_LOG: info
+    volumes:
+      - convex_data:/convex/data
+    networks:
+      default:
+      edge:
+        aliases: ["${STACK}-backend"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: curl -f http://localhost:3210/version
+      interval: 5s
+      start_period: 10s
+
+  dashboard:
+    image: ghcr.io/convex/convex-dashboard:${CONVEX_VERSION:-latest}
+    restart: unless-stopped
+    stop_grace_period: 10s
+    stop_signal: SIGINT
+    # Localhost only. Open with an SSH tunnel, e.g. prod:
+    #   ssh -L 6791:127.0.0.1:6791 vidoscript   then visit http://localhost:6791
+    ports:
+      - "127.0.0.1:${DASHBOARD_PORT}:6791"
+    environment:
+      NEXT_PUBLIC_DEPLOYMENT_URL: https://${API_HOST}
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_CONVEX_URL: https://${API_HOST}
+        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
+    image: vidoscript-app:${STACK}
+    restart: unless-stopped
+    env_file: ${STACK}.app.env
+    environment:
+      NEXT_PUBLIC_CONVEX_URL: https://${API_HOST}
+      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
+    networks:
+      default:
+      edge:
+        aliases: ["${STACK}-app"]
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ..
+      dockerfile: render-worker/Dockerfile
+    image: vidoscript-worker:${STACK}
+    restart: unless-stopped
+    env_file: ${STACK}.app.env
+    environment:
+      NEXT_PUBLIC_CONVEX_URL: https://${API_HOST}
+    # Remotion's Chrome needs more shared memory than Docker's 64 MB default.
+    shm_size: 1gb
+    depends_on:
+      backend:
+        condition: service_healthy
+
+networks:
+  edge:
+    name: vidoscript-edge
+    external: true
+
+volumes:
+  pg_data:
+  convex_data:

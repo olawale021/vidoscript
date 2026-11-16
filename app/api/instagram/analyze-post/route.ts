@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { transcribeAudio } from "@/lib/openai";
+import { trackOpenAI } from "@/lib/ai-usage";
 
 function getOpenAIClient() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -128,6 +129,7 @@ export async function POST(request: NextRequest) {
       ],
       response_format: { type: "json_object" },
     });
+    trackOpenAI(response, "instagram.analyzePost");
 
     const content = response.choices[0].message.content;
     if (!content) throw new Error("No analysis returned");

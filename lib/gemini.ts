@@ -6,6 +6,7 @@ import {
   type PlannerOptions,
 } from "@/lib/broll";
 import { HUMAN_VOICE_RULES, HUMAN_VOICE_RULES_COMPACT, styleSamplesBlock } from "@/lib/voice";
+import { trackGemini } from "@/lib/ai-usage";
 
 function getGeminiClient() {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -75,6 +76,7 @@ Return ONLY valid JSON, no markdown.`;
       { role: "user", parts: [{ text: `${systemPrompt}\n\nTranscript:\n${transcript}` }] },
     ],
   });
+  trackGemini(result, "analyzeTranscript");
 
   const content = result.response.text();
   if (!content) throw new Error("No analysis returned");
@@ -207,6 +209,7 @@ Write the script now. Keep each section within the word counts above. Do NOT use
       { role: "user", parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] },
     ],
   });
+  trackGemini(result, "generateScript");
 
   const content = result.response.text();
   if (!content) throw new Error("No script generated");
@@ -274,6 +277,7 @@ Rewrite ONLY the "${sectionName}" section in ~${targetWordCount} words. Make it 
       },
     ],
   });
+  trackGemini(result, "regenerateSection");
 
   const content = result.response.text();
   if (!content) throw new Error("No content generated");
@@ -333,6 +337,7 @@ Generate ${count} different variations of the "${sectionName}" section. Each mus
       },
     ],
   });
+  trackGemini(result, "regenerateSectionVariations");
 
   const content = result.response.text();
   if (!content) throw new Error("No variations generated");
@@ -410,6 +415,7 @@ Return the full updated script now.`
       },
     ],
   });
+  trackGemini(result, "chatRefineScript");
 
   const content = result.response.text();
   if (!content) throw new Error("No script generated");
@@ -468,6 +474,7 @@ Return a JSON object with a "variations" key containing an array of ${count} str
       },
     ],
   });
+  trackGemini(result, "chatRewriteSection");
 
   const content = result.response.text();
   if (!content) throw new Error("No content generated");
@@ -526,6 +533,7 @@ Write the script now.`;
   const result = await model.generateContent({
     contents: [{ role: "user", parts: [{ text: prompt }] }],
   });
+  trackGemini(result, "generateScriptFromIdea");
 
   const content = result.response.text();
   if (!content) throw new Error("No script generated");
@@ -547,6 +555,7 @@ export async function planScenes(
   const result = await model.generateContent({
     contents: [{ role: "user", parts: [{ text: `${system}\n\n${user}` }] }],
   });
+  trackGemini(result, "planScenes");
 
   const content = result.response.text();
   if (!content) throw new Error("No scene plan generated");

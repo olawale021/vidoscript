@@ -2,11 +2,12 @@
 // to MP4 with Remotion, uploads the result to Convex File Storage, and marks the
 // job done. Run locally (or deploy to a container) with:  npm run broll:worker
 //
-// Needs env: NEXT_PUBLIC_CONVEX_URL, BROLL_WORKER_SECRET (read from .env.local).
+// Needs env: NEXT_PUBLIC_CONVEX_URL, BROLL_WORKER_SECRET (from .env.local or the container).
+// Also sends a host-health heartbeat every 30 s for the admin System page.
 
 import { readFileSync } from "node:fs";
-import { readFile, unlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, statfs, unlink } from "node:fs/promises";
+import { cpus, freemem, loadavg, tmpdir, totalmem } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ConvexHttpClient } from "convex/browser";
@@ -17,8 +18,14 @@ import { api } from "../convex/_generated/api.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
 
-// Load .env.local
-for (const line of readFileSync(join(root, ".env.local"), "utf8").split("\n")) {
+// Load .env.local when present (local dev). In Docker, env comes from the container.
+let envFile = "";
+try {
+  envFile = readFileSync(join(root, ".env.local"), "utf8");
+} catch {
+  // no .env.local — rely on process.env
+}
+for (const line of envFile.split("\n")) {
   const m = line.match(/^([A-Z0-9_]+)=(.*)$/);
   if (m) process.env[m[1]] ??= m[2].replace(/^["']|["']$/g, "");
 }
@@ -36,6 +43,50 @@ const POLL_MS = 4000;
 console.log("[worker] bundling Remotion project...");
 const serveUrl = await bundle({ entryPoint: join(root, "remotion", "index.ts") });
 console.log("[worker] ready. polling for queued renders...");
+
+// ── Heartbeat: host health for the admin System page ──
+// In the container, /proc reports the host's load and memory, and "/" is the host disk.
+let currentRenderId = null;
+const HEARTBEAT_MS = 30_000;
+
+async function readMeminfo() {
+  try {
+    const text = await readFile("/proc/meminfo", "utf8");
+    const kb = (key) => Number(text.match(new RegExp(`^${key}:\\s+(\\d+)`, "m"))?.[1] ?? 0) * 1024;
+    return {
+      memTotal: kb("MemTotal"),
+      memAvailable: kb("MemAvailable"),
+      swapTotal: kb("SwapTotal"),
+      swapFree: kb("SwapFree"),
+    };
+  } catch {
+    return { memTotal: totalmem(), memAvailable: freemem(), swapTotal: 0, swapFree: 0 };
+  }
+}
+
+async function heartbeat() {
+  try {
+    const [l1, l5, l15] = loadavg();
+    const mem = await readMeminfo();
+    const disk = await statfs("/");
+    await convex.mutation(api.system.heartbeat, {
+      secret: SECRET,
+      loadAvg1: l1,
+      loadAvg5: l5,
+      loadAvg15: l15,
+      cpuCount: cpus().length,
+      ...mem,
+      diskTotal: disk.blocks * disk.bsize,
+      diskFree: disk.bavail * disk.bsize,
+      workerBusy: currentRenderId !== null,
+      ...(currentRenderId ? { currentRenderId } : {}),
+    });
+  } catch (e) {
+    console.error("[worker] heartbeat failed:", e instanceof Error ? e.message : e);
+  }
+}
+heartbeat();
+setInterval(heartbeat, HEARTBEAT_MS);
 
 async function renderOne(job) {
   console.log(`[worker] rendering ${job.id} (${job.scenePlan?.scenes?.length ?? 0} scenes)`);
@@ -82,6 +133,7 @@ while (true) {
   try {
     const queued = await convex.query(api.broll.listQueued, { secret: SECRET });
     for (const job of queued) {
+      currentRenderId = job.id;
       try {
         await renderOne(job);
       } catch (e) {
@@ -93,6 +145,8 @@ while (true) {
             error: e instanceof Error ? e.message : String(e),
           })
           .catch(() => {});
+      } finally {
+        currentRenderId = null;
       }
     }
   } catch (e) {

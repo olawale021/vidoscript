@@ -11,6 +11,7 @@ import {
   type PlannerOptions,
 } from "@/lib/broll";
 import { HUMAN_VOICE_RULES, HUMAN_VOICE_RULES_COMPACT, styleSamplesBlock } from "@/lib/voice";
+import { trackOpenAI, trackWhisper } from "@/lib/ai-usage";
 
 function getOpenAIClient() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -81,6 +82,7 @@ export async function transcribeAudio(audioFile: File): Promise<{
     response_format: "verbose_json",
     timestamp_granularities: ["segment"],
   });
+  trackWhisper(response, "transcribeAudio");
 
   return {
     text: response.text,
@@ -148,6 +150,7 @@ Return ONLY valid JSON, no markdown.`,
     ],
     response_format: { type: "json_object" },
   });
+  trackOpenAI(response, "analyzeTranscript");
 
   const content = response.choices[0].message.content;
   if (!content) throw new Error("No analysis returned");
@@ -283,6 +286,7 @@ Write the script now. Keep each section within the word counts above. Do NOT use
       },
     ],
   });
+  trackOpenAI(response, "generateScript");
 
   const content = response.choices[0].message.content;
   if (!content) throw new Error("No script generated");
@@ -350,6 +354,7 @@ Rewrite ONLY the "${sectionName}" section in ~${targetWordCount} words. Make it 
       },
     ],
   });
+  trackOpenAI(response, "regenerateSection");
 
   const content = response.choices[0].message.content;
   if (!content) throw new Error("No content generated");
@@ -412,6 +417,7 @@ Generate ${count} different variations of the "${sectionName}" section. Each mus
     ],
     response_format: { type: "json_object" },
   });
+  trackOpenAI(response, "regenerateSectionVariations");
 
   const content = response.choices[0].message.content;
   if (!content) throw new Error("No variations generated");
@@ -489,6 +495,7 @@ Return the full updated script now.`,
       },
     ],
   });
+  trackOpenAI(response, "chatRefineScript");
 
   const content = response.choices[0].message.content;
   if (!content) throw new Error("No script generated");
@@ -552,6 +559,7 @@ Remember: each variation must be ~${targetWordCount} words. Do not make it longe
     ],
     response_format: { type: "json_object" },
   });
+  trackOpenAI(response, "chatRewriteSection");
 
   const content = response.choices[0].message.content;
   if (!content) throw new Error("No content generated");
@@ -615,6 +623,7 @@ Write the script now.`,
       },
     ],
   });
+  trackOpenAI(response, "generateScriptFromIdea");
 
   const content = response.choices[0].message.content;
   if (!content) throw new Error("No script generated");
@@ -637,6 +646,7 @@ export async function planScenes(
     ],
     response_format: { type: "json_object" },
   });
+  trackOpenAI(response, "planScenes");
 
   const content = response.choices[0].message.content;
   if (!content) throw new Error("No scene plan generated");

@@ -44,3 +44,11 @@ next-env.d.ts
 # b-roll render scratch
 _out.mp4
 _test-*.mjs
+
+# Server deploy secrets
+deploy/*.env
+!deploy/.env.example
+
+# Production secrets kept on this Mac (copied to the server by Claude)
+.env.prod
+client_secret_250358688463-otse3o47vk1it87nhdtjchq1ih24e5ut.apps.googleusercontent.com.json
