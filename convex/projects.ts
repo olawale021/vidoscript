@@ -1,28 +1,21 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
+import { extFromName, fileUrl, r2, storagePrefix } from "./r2";
 
 function wordCount(text: string): number {
   return text.trim().split(/\s+/).filter(Boolean).length;
 }
 
-// Short-lived URL the client POSTs the raw video bytes to, returning a storageId.
+// Signed R2 URL the browser PUTs the raw video to. Returns the object key to
+// pass to createDraft.
 export const generateUploadUrl = mutation({
-  args: {},
-  handler: async (ctx) => {
+  args: { fileName: v.optional(v.string()), contentType: v.optional(v.string()) },
+  handler: async (ctx, { fileName, contentType }) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) throw new Error("Unauthorized");
-    return await ctx.storage.generateUploadUrl();
-  },
-});
-
-// Resolve a fetchable URL for an uploaded file, so the transcription server can
-// download the bytes from Convex instead of the browser uploading them twice.
-export const getStorageUrl = query({
-  args: { storageId: v.id("_storage") },
-  handler: async (ctx, { storageId }) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error("Unauthorized");
-    return await ctx.storage.getUrl(storageId);
+    const key = `${storagePrefix()}/uploads/${identity.subject}/${crypto.randomUUID()}.${extFromName(fileName, contentType)}`;
+    const { url } = await r2.generateUploadUrl(key);
+    return { url, key };
   },
 });
 
@@ -32,6 +25,7 @@ export const createDraft = mutation({
   args: {
     title: v.string(),
     videoStorageId: v.optional(v.id("_storage")),
+    videoKey: v.optional(v.string()),
     idea: v.optional(v.string()), // topic / rough notes — no video needed
     userPrompt: v.optional(v.union(v.string(), v.null())),
     model: v.optional(v.union(v.string(), v.null())),
@@ -39,7 +33,10 @@ export const createDraft = mutation({
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) throw new Error("Unauthorized");
-    const isIdea = !args.videoStorageId && !!args.idea?.trim();
+    if (args.videoKey && !args.videoKey.startsWith(`${storagePrefix()}/uploads/${identity.subject}/`)) {
+      throw new Error("Invalid upload");
+    }
+    const isIdea = !args.videoStorageId && !args.videoKey && !!args.idea?.trim();
     return await ctx.db.insert("projects", {
       userId: identity.subject,
       title: args.title || "Untitled",
@@ -54,6 +51,7 @@ export const createDraft = mutation({
       model: args.model ?? null,
       userPrompt: args.userPrompt ?? null,
       videoStorageId: args.videoStorageId,
+      videoKey: args.videoKey,
       status: "processing",
       progressStep: isIdea ? "analyzing" : "transcribing",
       error: null,
@@ -113,7 +111,7 @@ export const list = query({
         wordCount: wordCount(p.transcript),
         status: p.status ?? "ready",
         progressStep: p.progressStep ?? null,
-        videoUrl: p.videoStorageId ? await ctx.storage.getUrl(p.videoStorageId) : null,
+        videoUrl: await fileUrl(ctx, { key: p.videoKey, storageId: p.videoStorageId }),
         createdAt: p._creationTime,
         updatedAt: p.updatedAt,
       }))
@@ -170,11 +168,9 @@ export const get = query({
     if (!project || project.userId !== identity.subject) return null;
 
     // Resolve a playable URL for the stored video (if any)
-    const videoUrl = project.videoStorageId
-      ? await ctx.storage.getUrl(project.videoStorageId)
-      : null;
+    const videoUrl = await fileUrl(ctx, { key: project.videoKey, storageId: project.videoStorageId });
 
-    return { ...project, videoUrl };
+    return { ...project, videoUrl, hasVideo: !!(project.videoKey || project.videoStorageId) };
   },
 });
 

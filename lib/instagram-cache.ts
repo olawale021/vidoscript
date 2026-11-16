@@ -3,6 +3,7 @@ import { api } from "@/convex/_generated/api";
 import {
   getUserProfile,
   getUserFeed,
+  MAX_RESULTS,
   type InstagramPost,
   type InstagramFeed,
   type InstagramProfile,
@@ -14,24 +15,16 @@ const convex = new ConvexHttpClient(process.env.NEXT_PUBLIC_CONVEX_URL!);
 // stale so images keep working. One refresh per creator per day, max.
 const CACHE_STALE_MS = 24 * 60 * 60 * 1000;
 
-// Instagram pages are ~12 posts and the API has no count param, so chain
-// pages until we have at least this many. Each page costs one RapidAPI call.
-const MIN_FETCH_ITEMS = 20;
-
+// Apify takes a username, not a numeric user id: resolve it from the cached
+// profile (every feed is opened from a profile, so it is always cached first).
 async function fetchFeedPages(
   userId: string,
-  startMaxId?: string
+  cursor?: string
 ): Promise<{ items: InstagramPost[]; more_available: boolean; next_max_id?: string }> {
-  const items: InstagramPost[] = [];
-  let maxId = startMaxId;
-  let more = false;
-  do {
-    const page = await getUserFeed(userId, maxId);
-    items.push(...(page.items ?? []));
-    more = page.more_available ?? false;
-    maxId = page.next_max_id;
-  } while (more && maxId && items.length < MIN_FETCH_ITEMS);
-  return { items, more_available: more, next_max_id: maxId };
+  const user = (await convex.query(api.instagram.getUserByUserId, { userId })) as IgUserDoc | null;
+  if (!user) throw new Error("Open this creator's profile first, then load their posts");
+  const feed = await getUserFeed(user.username, cursor);
+  return { items: feed.items ?? [], more_available: feed.more_available, next_max_id: feed.next_max_id };
 }
 
 export interface FavoriteCreator extends InstagramProfile {
@@ -183,14 +176,14 @@ export async function getCachedUserFeed(
         userId: uid,
       })) as InstagramPost[];
       console.log(`[Cache] HIT igPosts for user ${uid}: ${cached.length} posts`);
-      // Keep pagination available on cache hits: the oldest cached post id
-      // works as the next_max_id cursor for the following page.
-      const hasMore = meta.mediaCount ? meta.count < meta.mediaCount : true;
+      // Keep "Load more" working on cache hits: the cursor is the number of
+      // posts already cached (see lib/instagram.ts).
+      const hasMore = (meta.mediaCount ? meta.count < meta.mediaCount : true) && meta.count < MAX_RESULTS;
       return {
         items: cached,
         num_results: cached.length,
         more_available: hasMore,
-        next_max_id: hasMore ? meta.oldestPostId ?? undefined : undefined,
+        next_max_id: hasMore ? String(meta.count) : undefined,
         status: "ok",
       };
     }

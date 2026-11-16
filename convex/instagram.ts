@@ -13,6 +13,16 @@ export const getUserByUsername = query({
   },
 });
 
+export const getUserByUserId = query({
+  args: { userId: v.string() },
+  handler: async (ctx, { userId }) => {
+    return await ctx.db
+      .query("igUsers")
+      .withIndex("by_userId", (q) => q.eq("userId", userId))
+      .first();
+  },
+});
+
 export const upsertUser = mutation({
   args: {
     username: v.string(),

@@ -1,5 +1,5 @@
 // B-roll render worker. Polls Convex for queued renders, renders the ScenePlan
-// to MP4 with Remotion, uploads the result to Convex File Storage, and marks the
+// to MP4 with Remotion, uploads the result to Cloudflare R2, and marks the
 // job done. Run locally (or deploy to a container) with:  npm run broll:worker
 //
 // Needs env: NEXT_PUBLIC_CONVEX_URL, BROLL_WORKER_SECRET (from .env.local or the container).
@@ -14,6 +14,10 @@ import { ConvexHttpClient } from "convex/browser";
 import { bundle } from "@remotion/bundler";
 import { selectComposition, renderMedia } from "@remotion/renderer";
 import { api } from "../convex/_generated/api.js";
+import { processClipSource } from "./clip-ingest.mjs";
+import { renderClip } from "./clip-render.mjs";
+import { generateSmartEdit } from "./smart-edit.mjs";
+import { checkLinkSource, downloadLinkSource } from "./clip-download.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
@@ -47,6 +51,9 @@ console.log("[worker] ready. polling for queued renders...");
 // ── Heartbeat: host health for the admin System page ──
 // In the container, /proc reports the host's load and memory, and "/" is the host disk.
 let currentRenderId = null;
+let clipBusy = false;
+let clipRenderBusy = false;
+let smartBusy = false;
 const HEARTBEAT_MS = 30_000;
 
 async function readMeminfo() {
@@ -78,7 +85,7 @@ async function heartbeat() {
       ...mem,
       diskTotal: disk.blocks * disk.bsize,
       diskFree: disk.bavail * disk.bsize,
-      workerBusy: currentRenderId !== null,
+      workerBusy: currentRenderId !== null || clipBusy || clipRenderBusy || smartBusy,
       ...(currentRenderId ? { currentRenderId } : {}),
     });
   } catch (e) {
@@ -116,20 +123,125 @@ async function renderOne(job) {
   });
 
   const mp4 = await readFile(outPath);
-  const uploadUrl = await convex.mutation(api.broll.generateOutputUploadUrl, { secret: SECRET });
-  const res = await fetch(uploadUrl, {
-    method: "POST",
+  const { url, key } = await convex.mutation(api.broll.generateOutputUpload, { secret: SECRET, renderId: job.id });
+  const res = await fetch(url, {
+    method: "PUT",
     headers: { "Content-Type": "video/mp4" },
     body: mp4,
   });
-  const { storageId } = await res.json();
-  await convex.mutation(api.broll.saveOutput, { secret: SECRET, renderId: job.id, storageId });
+  if (!res.ok) throw new Error(`Upload to R2 failed (${res.status})`);
+  await convex.mutation(api.broll.saveOutput, { secret: SECRET, renderId: job.id, key });
   await unlink(outPath).catch(() => {});
   console.log(`[worker] done ${job.id}`);
 }
 
-// Poll loop
+// Link lookups are quick (~10 s): look up length/size so the user can approve.
+async function processLinkChecks() {
+  const job = await convex.mutation(api.clips.claimNextCheck, { secret: SECRET });
+  if (!job) return false;
+  try {
+    await checkLinkSource({ convex, secret: SECRET, job });
+  } catch (e) {
+    console.error(`[worker] link lookup failed for ${job.id}:`, e instanceof Error ? e.message : e);
+    await convex
+      .mutation(api.clips.fail, { secret: SECRET, sourceId: job.id, error: e instanceof Error ? e.message : String(e) })
+      .catch(() => {});
+  }
+  return true;
+}
+
+async function processClips() {
+  // One clip source at a time; claimNext marks it "processing" atomically.
+  const job = await convex.mutation(api.clips.claimNext, { secret: SECRET });
+  if (!job) return false;
+  clipBusy = true;
+  try {
+    if (job.sourceType === "url") {
+      const { videoUrl, title } = await downloadLinkSource({ convex, secret: SECRET, job });
+      job.videoUrl = videoUrl;
+      job.title = title;
+    }
+    await processClipSource({ convex, secret: SECRET, job });
+  } catch (e) {
+    console.error(`[worker] clip source failed for ${job.id}:`, e);
+    await convex
+      .mutation(api.clips.fail, {
+        secret: SECRET,
+        sourceId: job.id,
+        error: e instanceof Error ? e.message : String(e),
+      })
+      .catch(() => {});
+  } finally {
+    clipBusy = false;
+  }
+  return true;
+}
+
+async function processClipRenders() {
+  const job = await convex.mutation(api.clipEditor.claimNextRender, { secret: SECRET });
+  if (!job) return false;
+  clipRenderBusy = true;
+  try {
+    await renderClip({ convex, secret: SECRET, serveUrl, job });
+  } catch (e) {
+    console.error(`[worker] clip render failed for ${job.id}:`, e);
+    await convex
+      .mutation(api.clipEditor.failRender, {
+        secret: SECRET,
+        clipId: job.id,
+        error: e instanceof Error ? e.message : String(e),
+      })
+      .catch(() => {});
+  } finally {
+    clipRenderBusy = false;
+  }
+  return true;
+}
+
+async function processSmartEdits() {
+  const job = await convex.mutation(api.smartEdit.claimNext, { secret: SECRET });
+  if (!job) return false;
+  smartBusy = true;
+  try {
+    console.log(`[smart] ${job.id}: generating smart edits`);
+    const smart = await generateSmartEdit({ convex, job });
+    await convex.mutation(api.smartEdit.saveGenerated, { secret: SECRET, clipId: job.id, smart });
+    console.log(`[smart] ${job.id}: done (${smart.removals.length} cuts, ${smart.zooms.length} zooms, ${smart.broll.length} b-roll)`);
+  } catch (e) {
+    console.error(`[worker] smart edit failed for ${job.id}:`, e);
+    await convex
+      .mutation(api.smartEdit.fail, { secret: SECRET, clipId: job.id, error: e instanceof Error ? e.message : String(e) })
+      .catch(() => {});
+  } finally {
+    smartBusy = false;
+  }
+  return true;
+}
+
+// Poll loop: clip sources first (users wait on them), then smart edits,
+// clip exports, then B-roll renders.
 while (true) {
+  try {
+    for (let i = 0; i < 5 && (await processLinkChecks()); i++);
+  } catch (e) {
+    console.error("[worker] link check poll error:", e);
+  }
+  try {
+    await processClips();
+  } catch (e) {
+    console.error("[worker] clip poll error:", e);
+  }
+  try {
+    // Drain smart-edit jobs (fast) before the next render.
+    for (let i = 0; i < 5 && (await processSmartEdits()); i++);
+  } catch (e) {
+    console.error("[worker] smart edit poll error:", e);
+  }
+  try {
+    await processClipRenders();
+  } catch (e) {
+    console.error("[worker] clip render poll error:", e);
+  }
   try {
     const queued = await convex.query(api.broll.listQueued, { secret: SECRET });
     for (const job of queued) {

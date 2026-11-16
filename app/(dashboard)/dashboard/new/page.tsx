@@ -45,25 +45,24 @@ export default function NewProjectPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Upload once (browser → Convex), create the project immediately, and hand off
+  // Upload once (browser → R2), create the project immediately, and hand off
   // to the project workspace, which runs the pipeline and shows live progress.
   const start = async () => {
     if (!file || isStarting) return;
     setIsStarting(true);
     setError(null);
     try {
-      const uploadUrl = await generateUploadUrlMut();
-      const res = await fetch(uploadUrl, {
-        method: "POST",
-        headers: { "Content-Type": file.type },
+      const { url, key } = await generateUploadUrlMut({ fileName: file.name, contentType: file.type });
+      const res = await fetch(url, {
+        method: "PUT",
+        headers: { "Content-Type": file.type || "video/mp4" },
         body: file,
       });
       if (!res.ok) throw new Error("Upload failed — please try again");
-      const { storageId } = await res.json();
 
       const id = await createDraftMut({
         title: file.name.replace(/\.[^/.]+$/, ""),
-        videoStorageId: storageId,
+        videoKey: key,
         userPrompt: userPrompt.trim() || null,
         model: "gemini",
       });

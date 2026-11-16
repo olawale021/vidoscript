@@ -2,7 +2,7 @@ import "server-only";
 import { auth } from "@clerk/nextjs/server";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "@/convex/_generated/api";
-import { tokenCost, whisperCost } from "@/lib/ai-pricing";
+import { groqWhisperCost, tokenCost, whisperCost } from "@/lib/ai-pricing";
 
 // Records one row per AI call in Convex (aiUsage) for the admin cost page.
 // Fire-and-forget: tracking must never slow down or break a user request.
@@ -25,7 +25,7 @@ async function currentUserId(): Promise<string> {
 }
 
 type Row = {
-  provider: "openai" | "gemini";
+  provider: "openai" | "gemini" | "apify" | "higgsfield" | "groq";
   model: string;
   feature: string;
   inputTokens: number;
@@ -67,16 +67,16 @@ export function trackOpenAI(res: OpenAIChatResponse, feature: string, fallbackMo
   });
 }
 
-export function trackWhisper(res: { duration?: number | string }, feature: string) {
+export function trackWhisper(res: { duration?: number | string }, feature: string, via: "openai" | "groq" = "openai") {
   const audioSeconds = Number(res.duration ?? 0) || 0;
   record({
-    provider: "openai",
-    model: "whisper-1",
+    provider: via,
+    model: via === "groq" ? "whisper-large-v3-turbo" : "whisper-1",
     feature,
     inputTokens: 0,
     outputTokens: 0,
     audioSeconds,
-    costUsd: whisperCost(audioSeconds),
+    costUsd: via === "groq" ? groqWhisperCost(audioSeconds) : whisperCost(audioSeconds),
   });
 }
 
@@ -102,5 +102,18 @@ export function trackGemini(result: GeminiResult, feature: string, model = "gemi
     inputTokens,
     outputTokens,
     costUsd: tokenCost(model, inputTokens, outputTokens),
+  });
+}
+
+// Apify bills per result returned (not tokens); stored with inputTokens = 0
+// and outputTokens = number of results.
+export function trackApify(feature: string, actor: string, results: number, pricePerResult: number) {
+  record({
+    provider: "apify",
+    model: actor.replace(/^apify~/, ""),
+    feature,
+    inputTokens: 0,
+    outputTokens: results,
+    costUsd: results * pricePerResult,
   });
 }

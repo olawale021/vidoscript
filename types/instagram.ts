@@ -40,6 +40,7 @@ export interface InstagramPost {
   original_height?: number;
   has_audio?: boolean;
   video_duration?: number;
+  play_count?: number; // reel plays (Apify videoPlayCount)
   caption: { text: string } | null;
   user: InstagramUser;
   product_type?: string;

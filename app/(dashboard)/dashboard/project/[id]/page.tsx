@@ -174,7 +174,7 @@ export default function ProjectWorkspacePage() {
 
       if (!project.script) {
         setPipelineStep("generating");
-        const isIdea = !project.videoStorageId;
+        const isIdea = !project.hasVideo;
         const res = await fetch("/api/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -234,7 +234,7 @@ export default function ProjectWorkspacePage() {
     setIsRegenerating(true);
     setError(null);
     const tone = toneOverride || selectedTone || undefined;
-    const isIdea = !project?.videoStorageId;
+    const isIdea = !project?.hasVideo;
     try {
       const res = await fetch("/api/generate", {
         method: "POST",
@@ -544,7 +544,7 @@ export default function ProjectWorkspacePage() {
               <div className="flex items-center gap-2 mb-4 flex-shrink-0">
                 <TabsList className="flex-1">
                   <TabsTrigger value="transcript" className="flex-1">
-                    {project.videoStorageId ? "Transcript" : "Notes"}
+                    {project.hasVideo ? "Transcript" : "Notes"}
                   </TabsTrigger>
                   <TabsTrigger value="analysis" className="flex-1">Analysis</TabsTrigger>
                 </TabsList>
@@ -561,7 +561,7 @@ export default function ProjectWorkspacePage() {
                 <Card className="h-full flex flex-col overflow-hidden">
                   <div className="flex items-center justify-between px-4 py-2.5 border-b border-neutral-800 flex-shrink-0">
                     <span className="text-xs font-semibold tracking-widest uppercase text-neutral-500">
-                      {project.videoStorageId ? "Original Transcript" : "Your Notes"}
+                      {project.hasVideo ? "Original Transcript" : "Your Notes"}
                     </span>
                     <button
                       onClick={handleCopyTranscript}

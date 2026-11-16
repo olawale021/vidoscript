@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import { mutation, query, type QueryCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
+import { fileUrl, r2, storagePrefix } from "./r2";
 
 // The user's own render row for a project. Admin load-test copies share the
 // projectId (loadTest: true) and are skipped so they never reach the UI.
@@ -53,9 +54,7 @@ export const getByProject = query({
     const render = await primaryRender(ctx, projectId);
     if (!render || render.userId !== identity.subject) return null;
 
-    const outputUrl = render.outputStorageId
-      ? await ctx.storage.getUrl(render.outputStorageId)
-      : null;
+    const outputUrl = await fileUrl(ctx, { key: render.outputKey, storageId: render.outputStorageId });
     return { ...render, outputUrl };
   },
 });
@@ -118,11 +117,14 @@ export const markRendering = mutation({
   },
 });
 
-export const generateOutputUploadUrl = mutation({
-  args: { secret: v.string() },
-  handler: async (ctx, { secret }) => {
+// Signed R2 PUT URL for a finished render.
+export const generateOutputUpload = mutation({
+  args: { secret: v.string(), renderId: v.id("renders") },
+  handler: async (ctx, { secret, renderId }) => {
     assertWorker(secret);
-    return await ctx.storage.generateUploadUrl();
+    const key = `${storagePrefix()}/renders/${renderId}-${Date.now()}.mp4`;
+    const { url } = await r2.generateUploadUrl(key);
+    return { url, key };
   },
 });
 
@@ -130,15 +132,21 @@ export const saveOutput = mutation({
   args: {
     secret: v.string(),
     renderId: v.id("renders"),
-    storageId: v.id("_storage"),
+    key: v.string(),
   },
-  handler: async (ctx, { secret, renderId, storageId }) => {
+  handler: async (ctx, { secret, renderId, key }) => {
     assertWorker(secret);
+    const render = await ctx.db.get(renderId);
+    if (!render) return null;
+    // Replace the previous output of a re-rendered plan.
+    if (render.outputKey && render.outputKey !== key) await r2.deleteObject(ctx, render.outputKey).catch(() => {});
+    if (render.outputStorageId) await ctx.storage.delete(render.outputStorageId).catch(() => {});
     const now = Date.now();
     await ctx.db.patch(renderId, {
       status: "done",
       progress: 100,
-      outputStorageId: storageId,
+      outputKey: key,
+      outputStorageId: undefined,
       error: null,
       finishedAt: now,
       updatedAt: now,

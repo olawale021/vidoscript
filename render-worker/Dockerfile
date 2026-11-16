@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libnss3 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
       libgbm1 libasound2 libxrandr2 libxkbcommon0 libxfixes3 libxcomposite1 \
       libxdamage1 libpango-1.0-0 libcairo2 \
+      ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -20,4 +21,7 @@ RUN node -e "require('@remotion/renderer').ensureBrowser().then(() => console.lo
 
 RUN chown -R node:node /app
 USER node
+# The static ffmpeg from ffmpeg-static segfaults on HTTPS inputs (static glibc +
+# DNS lookups), so the worker uses Debian's dynamically linked ffmpeg.
+ENV FFMPEG_PATH=/usr/bin/ffmpeg
 CMD ["node", "render-worker/worker.mjs"]

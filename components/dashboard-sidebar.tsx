@@ -14,6 +14,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Shield,
+  Scissors,
 } from "lucide-react";
 import { UserButton } from "@clerk/nextjs";
 import { useQuery } from "convex/react";
@@ -23,6 +24,7 @@ import { cn } from "@/lib/utils";
 const NAV = [
   { href: "/dashboard", icon: Home, label: "Dashboard", exact: true },
   { href: "/dashboard/new", icon: Plus, label: "New Project", exact: false },
+  { href: "/dashboard/clips", icon: Scissors, label: "Clips", exact: false },
   { href: "/dashboard/instagram", icon: Instagram, label: "Instagram Posts", exact: false },
   { href: "/dashboard/library", icon: Clapperboard, label: "Library", exact: false },
   { href: "/dashboard/ideas", icon: Lightbulb, label: "Idea Bank", exact: false },

@@ -1,5 +1,6 @@
 import { v } from "convex/values";
 import { mutation, query, type QueryCtx } from "./_generated/server";
+import { r2 } from "./r2";
 
 // ── Admin identity ──
 // Admins are listed in Convex env:
@@ -119,6 +120,7 @@ export const clearTestRenders = mutation({
       // Leave in-flight jobs alone; the worker still holds them.
       if (!r.loadTest || r.status === "rendering") continue;
       if (r.outputStorageId) await ctx.storage.delete(r.outputStorageId);
+      if (r.outputKey) await r2.deleteObject(ctx, r.outputKey).catch(() => {});
       await ctx.db.delete(r._id);
       removed++;
     }

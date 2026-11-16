@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { internalMutation, mutation, query } from "./_generated/server";
 import { requireAdmin } from "./admin";
 
 // Called by the Next.js server (lib/ai-usage.ts) after each AI call.
@@ -7,7 +7,7 @@ export const record = mutation({
   args: {
     secret: v.string(),
     userId: v.string(),
-    provider: v.union(v.literal("openai"), v.literal("gemini")),
+    provider: v.union(v.literal("openai"), v.literal("gemini"), v.literal("apify"), v.literal("higgsfield"), v.literal("groq")),
     model: v.string(),
     feature: v.string(),
     inputTokens: v.number(),
@@ -18,6 +18,24 @@ export const record = mutation({
   handler: async (ctx, { secret, ...row }) => {
     const expected = process.env.INTERNAL_API_SECRET;
     if (!expected || secret !== expected) throw new Error("Bad internal secret");
+    await ctx.db.insert("aiUsage", { ...row, createdAt: Date.now() });
+    return null;
+  },
+});
+
+// Same as `record`, for Convex actions (no secret needed inside Convex).
+export const recordInternal = internalMutation({
+  args: {
+    userId: v.string(),
+    provider: v.union(v.literal("openai"), v.literal("gemini"), v.literal("apify"), v.literal("higgsfield"), v.literal("groq")),
+    model: v.string(),
+    feature: v.string(),
+    inputTokens: v.number(),
+    outputTokens: v.number(),
+    audioSeconds: v.optional(v.number()),
+    costUsd: v.number(),
+  },
+  handler: async (ctx, row) => {
     await ctx.db.insert("aiUsage", { ...row, createdAt: Date.now() });
     return null;
   },

@@ -309,7 +309,7 @@ export function PostDetailModal({
             {/* Comments (lazy-loaded) */}
             {post.comment_count > 0 && (
               <div className="pt-2 border-t border-neutral-800">
-                <CommentsSection mediaId={post.id} />
+                {post.code && <CommentsSection shortcode={post.code} />}
               </div>
             )}
           </div>

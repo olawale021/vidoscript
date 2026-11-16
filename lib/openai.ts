@@ -76,13 +76,33 @@ export async function transcribeAudio(audioFile: File): Promise<{
     fileToSend = await extractAudio(audioFile);
   }
 
-  const response = await getOpenAIClient().audio.transcriptions.create({
-    file: fileToSend,
-    model: "whisper-1",
-    response_format: "verbose_json",
-    timestamp_granularities: ["segment"],
-  });
-  trackWhisper(response, "transcribeAudio");
+  // Groq's whisper-large-v3-turbo first (~9x cheaper, much faster), OpenAI as fallback.
+  let response: Awaited<ReturnType<OpenAI["audio"]["transcriptions"]["create"]>> & {
+    text: string;
+    duration?: number;
+    segments?: { start: number; end: number; text: string }[];
+  };
+  const groqKey = process.env.GROQ_API_KEY;
+  try {
+    if (!groqKey) throw new Error("no Groq key");
+    const groq = new OpenAI({ apiKey: groqKey, baseURL: "https://api.groq.com/openai/v1" });
+    response = (await groq.audio.transcriptions.create({
+      file: fileToSend,
+      model: "whisper-large-v3-turbo",
+      response_format: "verbose_json",
+      timestamp_granularities: ["segment"],
+    })) as typeof response;
+    trackWhisper(response, "transcribeAudio", "groq");
+  } catch (e) {
+    if (groqKey) console.warn("[transcribe] Groq failed, falling back to OpenAI:", e instanceof Error ? e.message : e);
+    response = (await getOpenAIClient().audio.transcriptions.create({
+      file: fileToSend,
+      model: "whisper-1",
+      response_format: "verbose_json",
+      timestamp_granularities: ["segment"],
+    })) as typeof response;
+    trackWhisper(response, "transcribeAudio");
+  }
 
   return {
     text: response.text,

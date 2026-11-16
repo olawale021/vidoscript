@@ -1,5 +1,6 @@
 import { v } from "convex/values";
 import { internalMutation, mutation, query } from "./_generated/server";
+import { fileUrl, r2 } from "./r2";
 import { internal } from "./_generated/api";
 
 // ── Media library ──
@@ -33,10 +34,8 @@ export const list = query({
         fileSizeBytes: item.fileSizeBytes ?? null,
         status: item.status,
         error: item.error ?? null,
-        videoUrl: item.storageId ? await ctx.storage.getUrl(item.storageId) : null,
-        thumbnailUrl: item.thumbnailStorageId
-          ? await ctx.storage.getUrl(item.thumbnailStorageId)
-          : null,
+        videoUrl: await fileUrl(ctx, { key: item.videoKey, storageId: item.storageId }),
+        thumbnailUrl: await fileUrl(ctx, { key: item.thumbnailKey, storageId: item.thumbnailStorageId }),
         createdAt: item._creationTime,
       }))
     );
@@ -77,6 +76,7 @@ export const startInstagramImport = mutation({
         if (existing.status === "failed") {
           await ctx.db.patch(existing._id, { status: "importing", error: null });
           await ctx.scheduler.runAfter(0, internal.libraryActions.importInstagramVideo, {
+            userId: identity.subject,
             itemId: existing._id,
             shortcode: args.shortcode,
             videoUrl: args.videoUrl,
@@ -103,6 +103,7 @@ export const startInstagramImport = mutation({
     });
 
     await ctx.scheduler.runAfter(0, internal.libraryActions.importInstagramVideo, {
+            userId: identity.subject,
       itemId: id,
       shortcode: args.shortcode,
       videoUrl: args.videoUrl,
@@ -130,6 +131,7 @@ export const retryImport = mutation({
     }
     await ctx.db.patch(id, { status: "importing", error: null });
     await ctx.scheduler.runAfter(0, internal.libraryActions.importInstagramVideo, {
+            userId: identity.subject,
       itemId: id,
       shortcode: item.shortcode,
     });
@@ -138,7 +140,7 @@ export const retryImport = mutation({
 });
 
 // Delete an item. The stored files are only removed when no project still
-// references them (projects copy the item's videoStorageId at creation).
+// references them (projects copy the item's video key / storageId at creation).
 export const remove = mutation({
   args: { id: v.id("libraryItems") },
   handler: async (ctx, { id }) => {
@@ -154,12 +156,15 @@ export const remove = mutation({
     const referenced = projects.some(
       (p) =>
         p.libraryItemId === id ||
-        (item.storageId && p.videoStorageId === item.storageId)
+        (item.storageId && p.videoStorageId === item.storageId) ||
+        (item.videoKey && p.videoKey === item.videoKey)
     );
 
     if (!referenced) {
       if (item.storageId) await ctx.storage.delete(item.storageId);
       if (item.thumbnailStorageId) await ctx.storage.delete(item.thumbnailStorageId);
+      if (item.videoKey) await r2.deleteObject(ctx, item.videoKey).catch(() => {});
+      if (item.thumbnailKey) await r2.deleteObject(ctx, item.thumbnailKey).catch(() => {});
     }
     await ctx.db.delete(id);
     return null;
@@ -178,7 +183,7 @@ export const createProject = mutation({
     if (!identity) throw new Error("Unauthorized");
     const item = await ctx.db.get(id);
     if (!item || item.userId !== identity.subject) throw new Error("Not found");
-    if (item.status !== "ready" || !item.storageId) {
+    if (item.status !== "ready" || !(item.storageId || item.videoKey)) {
       throw new Error("This video hasn't finished importing yet");
     }
 
@@ -201,6 +206,7 @@ export const createProject = mutation({
       model: "gemini",
       userPrompt: userPrompt ?? null,
       videoStorageId: item.storageId,
+      videoKey: item.videoKey,
       libraryItemId: id,
       status: "processing",
       progressStep: "transcribing",
@@ -215,8 +221,8 @@ export const createProject = mutation({
 export const markReady = internalMutation({
   args: {
     id: v.id("libraryItems"),
-    storageId: v.id("_storage"),
-    thumbnailStorageId: v.optional(v.id("_storage")),
+    videoKey: v.string(),
+    thumbnailKey: v.optional(v.string()),
     fileSizeBytes: v.optional(v.number()),
     // Metadata discovered during resolution (paste-URL imports start with
     // nothing but a shortcode). Never overwrites values already set.
@@ -228,11 +234,11 @@ export const markReady = internalMutation({
     const item = await ctx.db.get(id);
     if (!item) return null;
     const updates: Record<string, unknown> = {
-      storageId: fields.storageId,
+      videoKey: fields.videoKey,
       status: "ready",
       error: null,
     };
-    if (fields.thumbnailStorageId) updates.thumbnailStorageId = fields.thumbnailStorageId;
+    if (fields.thumbnailKey) updates.thumbnailKey = fields.thumbnailKey;
     if (fields.fileSizeBytes !== undefined) updates.fileSizeBytes = fields.fileSizeBytes;
     if (fields.creatorHandle && !item.creatorHandle) updates.creatorHandle = fields.creatorHandle;
     if (fields.caption && !item.caption) updates.caption = fields.caption;

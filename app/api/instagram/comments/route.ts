@@ -2,20 +2,20 @@ import { NextRequest, NextResponse } from "next/server";
 import { getMediaComments } from "@/lib/instagram";
 
 export async function GET(req: NextRequest) {
-  // Media ID passed as string to avoid JS float precision loss on 19-digit IDs
-  const id = req.nextUrl.searchParams.get("id");
+  // Post shortcode (instagram.com/p/{shortcode}); Apify looks comments up by URL.
+  const shortcode = req.nextUrl.searchParams.get("shortcode");
   const nextMinId = req.nextUrl.searchParams.get("next_min_id") || undefined;
 
-  if (!id) {
+  if (!shortcode) {
     return NextResponse.json(
-      { error: "id is required" },
+      { error: "shortcode is required" },
       { status: 400 }
     );
   }
 
   try {
-    console.log("[API /instagram/comments] Fetching comments for media:", id);
-    const data = await getMediaComments(id, nextMinId);
+    console.log("[API /instagram/comments] Fetching comments for post:", shortcode);
+    const data = await getMediaComments(shortcode, nextMinId);
     return NextResponse.json(data);
   } catch (error) {
     console.error("[API /instagram/comments] Error:", error);

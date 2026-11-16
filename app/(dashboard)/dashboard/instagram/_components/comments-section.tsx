@@ -7,10 +7,10 @@ import type { InstagramComment } from "@/types/instagram";
 import { formatCount, formatDate } from "./post-card";
 
 interface CommentsSectionProps {
-  mediaId: string;
+  shortcode: string;
 }
 
-export function CommentsSection({ mediaId }: CommentsSectionProps) {
+export function CommentsSection({ shortcode }: CommentsSectionProps) {
   const [comments, setComments] = useState<InstagramComment[]>([]);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -23,7 +23,7 @@ export function CommentsSection({ mediaId }: CommentsSectionProps) {
     setError(null);
 
     try {
-      const params = new URLSearchParams({ id: mediaId });
+      const params = new URLSearchParams({ shortcode });
       if (minId) params.set("next_min_id", minId);
 
       const res = await fetch(`/api/instagram/comments?${params.toString()}`);
