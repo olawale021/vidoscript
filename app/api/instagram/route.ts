@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCachedUserFeed } from "@/lib/instagram-cache";
+import { logAppError } from "@/lib/app-errors";
 
 export async function GET(req: NextRequest) {
   const userId = req.nextUrl.searchParams.get("user_id");
@@ -23,6 +24,7 @@ export async function GET(req: NextRequest) {
     });
     return NextResponse.json(data);
   } catch (error) {
+    logAppError("api/instagram", error);
     console.error("[API /instagram] Error:", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Failed to fetch posts" },

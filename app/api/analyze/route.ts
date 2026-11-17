@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import * as gemini from "@/lib/gemini";
 import * as openai from "@/lib/openai";
+import { logAppError } from "@/lib/app-errors";
 
 function getProvider(model?: string) {
   return model === "gpt4o" ? openai : gemini;
@@ -22,6 +23,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(analysis);
   } catch (error) {
+    logAppError("api/analyze", error);
     console.error("Analysis error:", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Analysis failed" },

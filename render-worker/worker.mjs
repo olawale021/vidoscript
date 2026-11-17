@@ -13,11 +13,13 @@ import { fileURLToPath } from "node:url";
 import { ConvexHttpClient } from "convex/browser";
 import { bundle } from "@remotion/bundler";
 import { selectComposition, renderMedia } from "@remotion/renderer";
+import { getBrowser, resetBrowser } from "./browser.mjs";
 import { api } from "../convex/_generated/api.js";
 import { processClipSource } from "./clip-ingest.mjs";
 import { renderClip } from "./clip-render.mjs";
 import { generateSmartEdit } from "./smart-edit.mjs";
 import { checkLinkSource, downloadLinkSource } from "./clip-download.mjs";
+import { reportError } from "./report.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
@@ -52,6 +54,9 @@ console.log("[worker] ready. polling for queued renders...");
 // In the container, /proc reports the host's load and memory, and "/" is the host disk.
 let currentRenderId = null;
 let clipBusy = false;
+// Jobs currently held, so a shutdown can hand them back to the queue.
+const held = { source: null, smart: null, render: null };
+let stopping = false;
 let clipRenderBusy = false;
 let smartBusy = false;
 const HEARTBEAT_MS = 30_000;
@@ -99,10 +104,12 @@ async function renderOne(job) {
   console.log(`[worker] rendering ${job.id} (${job.scenePlan?.scenes?.length ?? 0} scenes)`);
   await convex.mutation(api.broll.markRendering, { secret: SECRET, renderId: job.id, progress: 1 });
 
+  const puppeteerInstance = await getBrowser();
   const composition = await selectComposition({
     serveUrl,
     id: "Broll",
     inputProps: { plan: job.scenePlan },
+    puppeteerInstance,
   });
 
   const outPath = join(tmpdir(), `broll-${job.id}.mp4`);
@@ -110,8 +117,10 @@ async function renderOne(job) {
     composition,
     serveUrl,
     codec: "h264",
+    x264Preset: "veryfast",
     outputLocation: outPath,
     inputProps: { plan: job.scenePlan },
+    puppeteerInstance,
     onProgress: ({ progress }) => {
       const pct = Math.round(progress * 100);
       if (pct % 10 === 0) {
@@ -143,6 +152,7 @@ async function processLinkChecks() {
     await checkLinkSource({ convex, secret: SECRET, job });
   } catch (e) {
     console.error(`[worker] link lookup failed for ${job.id}:`, e instanceof Error ? e.message : e);
+    reportError(convex, { feature: "clips.youtubeLookup", error: e, userId: job.userId, sourceId: job.id });
     await convex
       .mutation(api.clips.fail, { secret: SECRET, sourceId: job.id, error: e instanceof Error ? e.message : String(e) })
       .catch(() => {});
@@ -152,9 +162,11 @@ async function processLinkChecks() {
 
 async function processClips() {
   // One clip source at a time; claimNext marks it "processing" atomically.
+  if (stopping) return false;
   const job = await convex.mutation(api.clips.claimNext, { secret: SECRET });
   if (!job) return false;
   clipBusy = true;
+  held.source = job.id;
   try {
     if (job.sourceType === "url") {
       const { videoUrl, title } = await downloadLinkSource({ convex, secret: SECRET, job });
@@ -164,6 +176,12 @@ async function processClips() {
     await processClipSource({ convex, secret: SECRET, job });
   } catch (e) {
     console.error(`[worker] clip source failed for ${job.id}:`, e);
+    reportError(convex, {
+      feature: job.findMore ? "clips.findMore" : job.sourceType === "url" ? "clips.youtube" : "clips.ingest",
+      error: e,
+      userId: job.userId,
+      sourceId: job.id,
+    });
     await convex
       .mutation(api.clips.fail, {
         secret: SECRET,
@@ -173,18 +191,22 @@ async function processClips() {
       .catch(() => {});
   } finally {
     clipBusy = false;
+    held.source = null;
   }
   return true;
 }
 
 async function processClipRenders() {
+  if (stopping) return false;
   const job = await convex.mutation(api.clipEditor.claimNextRender, { secret: SECRET });
   if (!job) return false;
   clipRenderBusy = true;
+  held.render = job.id;
   try {
     await renderClip({ convex, secret: SECRET, serveUrl, job });
   } catch (e) {
     console.error(`[worker] clip render failed for ${job.id}:`, e);
+    reportError(convex, { feature: "clips.export", error: e, userId: job.userId, clipId: job.id });
     await convex
       .mutation(api.clipEditor.failRender, {
         secret: SECRET,
@@ -194,14 +216,17 @@ async function processClipRenders() {
       .catch(() => {});
   } finally {
     clipRenderBusy = false;
+    held.render = null;
   }
   return true;
 }
 
 async function processSmartEdits() {
+  if (stopping) return false;
   const job = await convex.mutation(api.smartEdit.claimNext, { secret: SECRET });
   if (!job) return false;
   smartBusy = true;
+  held.smart = job.id;
   try {
     console.log(`[smart] ${job.id}: generating smart edits`);
     const smart = await generateSmartEdit({ convex, job });
@@ -209,14 +234,32 @@ async function processSmartEdits() {
     console.log(`[smart] ${job.id}: done (${smart.removals.length} cuts, ${smart.zooms.length} zooms, ${smart.broll.length} b-roll)`);
   } catch (e) {
     console.error(`[worker] smart edit failed for ${job.id}:`, e);
+    reportError(convex, { feature: "clips.smartEdit", error: e, userId: job.userId, clipId: job.id });
     await convex
       .mutation(api.smartEdit.fail, { secret: SECRET, clipId: job.id, error: e instanceof Error ? e.message : String(e) })
       .catch(() => {});
   } finally {
     smartBusy = false;
+    held.smart = null;
   }
   return true;
 }
+
+// Graceful shutdown (docker stop / redeploy): hand held jobs back to the
+// queue so the next worker picks them up immediately, then exit.
+async function shutdown(signal) {
+  if (stopping) return;
+  stopping = true;
+  console.log(`[worker] ${signal}: releasing held jobs`);
+  const tasks = [];
+  if (held.source) tasks.push(convex.mutation(api.clips.releaseSource, { secret: SECRET, sourceId: held.source }));
+  if (held.smart) tasks.push(convex.mutation(api.smartEdit.release, { secret: SECRET, clipId: held.smart }));
+  if (held.render) tasks.push(convex.mutation(api.clipEditor.releaseRender, { secret: SECRET, clipId: held.render }));
+  await Promise.allSettled(tasks);
+  process.exit(0);
+}
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
 
 // Poll loop: clip sources first (users wait on them), then smart edits,
 // clip exports, then B-roll renders.
@@ -250,6 +293,8 @@ while (true) {
         await renderOne(job);
       } catch (e) {
         console.error(`[worker] render failed for ${job.id}:`, e);
+        await resetBrowser();
+        reportError(convex, { feature: "broll.render", error: e });
         await convex
           .mutation(api.broll.markFailed, {
             secret: SECRET,

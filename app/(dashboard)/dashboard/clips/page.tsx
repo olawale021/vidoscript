@@ -24,6 +24,20 @@ function putWithProgress(url: string, file: File, onProgress: (pct: number) => v
   });
 }
 
+// Download options for pasted links. Size is relative to 720p (measured ≈ 16 MB/min);
+// the main downloader charges the same tiny per-minute price at any quality.
+const QUALITIES = [
+  { key: "360", label: "360p", sizeVs720: 0.31, note: "Smallest · blurry when cropped to 9:16" },
+  { key: "480", label: "480p", sizeVs720: 0.56, note: "Fine for talking heads" },
+  { key: "720", label: "720p", sizeVs720: 1, note: "Recommended" },
+  { key: "1080", label: "1080p", sizeVs720: 1.9, note: "Sharpest — best for 9:16 crops" },
+] as const;
+const DOWNLOAD_PER_MIN = 0.000011; // johnvc, any quality (the backup downloader costs more)
+const usdText = (n: number) => (n < 0.01 ? "<$0.01" : `$${n.toFixed(2)}`);
+type Quality = (typeof QUALITIES)[number]["key"];
+
+const fmtSize = (mb: number) => (mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${Math.round(mb)} MB`);
+
 export default function ClipsPage() {
   const sources = useQuery(api.clips.list);
   const createUpload = useMutation(api.clips.createUpload);
@@ -31,6 +45,7 @@ export default function ClipsPage() {
   const createFromUrl = useMutation(api.clips.createFromUrl);
   const confirmDownload = useMutation(api.clips.confirmDownload);
   const removeSource = useMutation(api.clips.remove);
+  const [quality, setQuality] = useState<Record<string, Quality>>({});
   const [mode, setMode] = useState<"upload" | "link">("upload");
   const [link, setLink] = useState("");
   const [rights, setRights] = useState(false);
@@ -132,8 +147,8 @@ export default function ClipsPage() {
             </span>
           </label>
           <p className="text-xs text-neutral-500">
-            Public videos up to 1 hour (longer ones are rejected before anything is charged). Downloading costs about
-            $0.02 per minute of video — a 10-minute video ≈ $0.20. Kept for 30 days.
+            Public videos up to 1 hour. You&apos;ll see the length, size and cost before anything is downloaded — usually
+            under $0.01 per video. Kept for 30 days.
           </p>
         </div>
       ) : (
@@ -199,14 +214,61 @@ export default function ClipsPage() {
             <div className="min-w-0 flex-1">
               <div className="text-neutral-100 font-medium truncate">{s.title}</div>
               {s.channelName && <div className="text-xs text-neutral-500">{s.channelName}</div>}
-              <div className="text-sm text-neutral-300 mt-2 flex flex-wrap gap-x-4 gap-y-1">
-                <span>Length <b>{s.durationSec ? `${Math.floor(s.durationSec / 60)}:${String(Math.round(s.durationSec % 60)).padStart(2, "0")}` : "?"}</b></span>
-                <span>Download ≈ <b>{s.estimateMb ? (s.estimateMb >= 1000 ? `${(s.estimateMb / 1000).toFixed(1)} GB` : `${s.estimateMb} MB`) : "?"}</b></span>
-                <span>Cost ≈ <b>${s.estimateUsd?.toFixed(2) ?? "?"}</b> + transcription ≈ <b>${s.durationSec ? ((s.durationSec / 60) * 0.006).toFixed(2) : "?"}</b></span>
-              </div>
+              {(() => {
+                const minutes = Math.max(1, Math.ceil((s.durationSec ?? 0) / 60));
+                // Qualities this video actually has (unknown → all allowed).
+                const avail = s.availableQualities;
+                const has = (k: string) => !avail || avail.length === 0 || avail.includes(k);
+                const fallbackQ = [...QUALITIES].reverse().find((x) => x.key !== "1080" && has(x.key))?.key ?? "720";
+                const q = quality[s._id] ?? (has("720") ? "720" : fallbackQ);
+                const opt = QUALITIES.find((x) => x.key === q)!;
+                const mb720 = s.estimateMb ?? minutes * 16;
+                const dl = minutes * DOWNLOAD_PER_MIN;
+                const tr = Math.max(0.01, ((s.durationSec ?? 0) / 3600) * 0.04);
+                return (
+                  <div className="mt-2 space-y-2">
+                    <div className="flex flex-wrap gap-1">
+                      {QUALITIES.map((x) => (
+                        <button
+                          key={x.key}
+                          disabled={!has(x.key)}
+                          onClick={() => setQuality((prev) => ({ ...prev, [s._id]: x.key }))}
+                          title={has(x.key) ? x.note : "Not available for this video"}
+                          className={cn(
+                            "rounded-md border px-2.5 py-1 text-xs transition text-left disabled:opacity-30 disabled:cursor-not-allowed",
+                            q === x.key ? "border-sky-400 bg-sky-400/10 text-white" : "border-neutral-700 text-neutral-400 hover:text-white"
+                          )}
+                        >
+                          <div className="font-semibold">{x.label}</div>
+                          <div className="text-[11px] opacity-80">{has(x.key) ? fmtSize(mb720 * x.sizeVs720) : "n/a"}</div>
+                        </button>
+                      ))}
+                    </div>
+                    <div className="text-sm text-neutral-300 flex flex-wrap gap-x-4 gap-y-1">
+                      <span>
+                        Length{" "}
+                        <b>
+                          {s.durationSec
+                            ? `${Math.floor(s.durationSec / 60)}:${String(Math.round(s.durationSec % 60)).padStart(2, "0")}`
+                            : "?"}
+                        </b>
+                      </span>
+                      <span>Size ≈ <b>{fmtSize(mb720 * opt.sizeVs720)}</b></span>
+                      <span>
+                        Download ≈ <b>{usdText(dl)}</b> + transcription (Groq) ≈ <b>{usdText(tr)}</b> · total ≈{" "}
+                        <b>{usdText(dl + tr)}</b>
+                      </span>
+                    </div>
+                    <div className="text-xs text-neutral-500">
+                      {opt.note}. You get this quality or the best one below it. If the main downloader fails, a backup is
+                      used (≈ ${(minutes * 0.02).toFixed(2)} at 720p).
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
             <div className="flex gap-2">
-              <Button onClick={() => confirmDownload({ sourceId: s._id })}>Download</Button>
+              <Button onClick={() => confirmDownload({ sourceId: s._id, quality: quality[s._id] ?? "720" })}>Download</Button>
               <Button variant="outline" onClick={() => removeSource({ sourceId: s._id })}>Cancel</Button>
             </div>
           </div>

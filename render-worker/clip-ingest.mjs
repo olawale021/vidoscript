@@ -15,6 +15,7 @@ const ffmpegPath = process.env.FFMPEG_PATH || ffmpegStatic;
 import OpenAI, { toFile } from "openai";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { api } from "../convex/_generated/api.js";
+import { withAiRetry } from "./report.mjs";
 
 const CHUNK_SECONDS = 20 * 60;
 const GEMINI_MODEL = "gemini-2.5-flash";
@@ -105,7 +106,7 @@ function preferenceBlock(prefs) {
   if (!prefs || (!prefs.liked.length && !prefs.disliked.length)) return "";
   const fmt = (c) =>
     `- "${c.title}" (${c.seconds}s)${c.reasons.length ? ` [${c.reasons.join(", ")}]` : ""}: ${c.text}`;
-  return `\n\nThis creator has rated earlier clips. Pick moments like the ones they LIKED and avoid what they DISLIKED (match topic, energy, length and style, and respect the reasons given):
+  return `\n\nThis creator has rated clips from their earlier videos. Learn WHAT KIND of moment they like — hook strength, energy, humour, pacing, length, story shape, how self-contained it is — and pick moments of that kind from THIS video's own content. Don't look for the same topics or names as the examples (they may be from different videos), and avoid the kinds of moment they DISLIKED, respecting the reasons given:
 ${prefs.liked.length ? `LIKED:\n${prefs.liked.map(fmt).join("\n")}` : ""}
 ${prefs.disliked.length ? `DISLIKED:\n${prefs.disliked.map(fmt).join("\n")}` : ""}`;
 }
@@ -168,7 +169,7 @@ async function findClips({ segments, words, duration, title, convex, userId, cou
   if (prefs && (prefs.liked.length || prefs.disliked.length)) {
     console.log(`[clips] using preferences: ${prefs.liked.length} liked, ${prefs.disliked.length} disliked`);
   }
-  const result = await model.generateContent({
+  const result = await withAiRetry(() => model.generateContent({
     contents: [
       {
         role: "user",
@@ -179,7 +180,7 @@ async function findClips({ segments, words, duration, title, convex, userId, cou
         ],
       },
     ],
-  });
+  }));
   const u = result.response.usageMetadata ?? {};
   const inputTokens = u.promptTokenCount ?? 0;
   const outputTokens = (u.candidatesTokenCount ?? 0) + (u.thoughtsTokenCount ?? 0);

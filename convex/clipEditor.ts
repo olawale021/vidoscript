@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import { mutation, query, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
-import { aiShotUrls, r2, SIX_HOURS, storagePrefix } from "./r2";
+import { aiShotUrls, downloadUrl, r2, safeFileName, SIX_HOURS, storagePrefix } from "./r2";
 import { assertWorker } from "./broll";
 
 // Clip editor + export (Phase 2). Clips come from convex/clips.ts; this file
@@ -72,6 +72,7 @@ export const editorData = query({
       source: { _id: source._id, title: source.title, durationSec: source.durationSec ?? null },
       videoUrl: await r2.getUrl(source.videoKey, { expiresIn: SIX_HOURS }),
       outputUrl: clip.outputKey ? await r2.getUrl(clip.outputKey, { expiresIn: SIX_HOURS }) : null,
+      downloadUrl: clip.outputKey ? await downloadUrl(clip.outputKey, safeFileName(clip.title)) : null,
       window: { start: windowStart, end: windowEnd },
       aiShotUrls: await aiShotUrls(clip.smart),
       words: await clipWords(ctx, clip, windowStart, windowEnd),
@@ -89,6 +90,8 @@ export const update = mutation({
     captionStyle: v.optional(styleV),
     captionPosition: v.optional(positionV),
     cropX: v.optional(v.number()),
+    framing: v.optional(v.union(v.literal("fill"), v.literal("fit"))),
+    fitBackground: v.optional(v.union(v.literal("black"), v.literal("blur"))),
   },
   handler: async (ctx, { clipId, ...patch }) => {
     const clip = await ownClip(ctx, clipId);
@@ -106,6 +109,8 @@ export const update = mutation({
       ...(patch.captionStyle ? { captionStyle: patch.captionStyle } : {}),
       ...(patch.captionPosition ? { captionPosition: patch.captionPosition } : {}),
       ...(patch.cropX !== undefined ? { cropX: Math.max(0, Math.min(1, patch.cropX)) } : {}),
+      ...(patch.framing ? { framing: patch.framing } : {}),
+      ...(patch.fitBackground ? { fitBackground: patch.fitBackground } : {}),
     });
     return null;
   },
@@ -203,7 +208,13 @@ export const claimNextRender = mutation({
       await ctx.db.patch(clip._id, { renderStatus: "failed", renderError: "Source video was deleted" });
       return null;
     }
-    await ctx.db.patch(clip._id, { renderStatus: "rendering", renderProgress: 1, renderStartedAt: now });
+    await ctx.db.patch(clip._id, {
+      renderStatus: "rendering",
+      renderProgress: 1,
+      renderStartedAt: now,
+      renderedAspect: clip.aspect ?? "9:16",
+      renderedFraming: clip.framing ?? "fit",
+    });
     const words = await clipWords(ctx, clip, clip.start, clip.end);
     return {
       id: clip._id,
@@ -216,6 +227,8 @@ export const claimNextRender = mutation({
       captionStyle: clip.captionStyle ?? "bold",
       captionPosition: clip.captionPosition ?? "bottom",
       cropX: clip.cropX ?? 0.5,
+      framing: clip.framing ?? "fit",
+      fitBackground: clip.fitBackground ?? "blur",
       words: words.map((w) => ({ w: w.w, s: w.s, e: w.e })), // source seconds
       smart: clip.smart ? await withAiShotUrls(clip.smart) : null,
     };
@@ -270,6 +283,30 @@ export const failRender = mutation({
       renderError: error.slice(0, 500),
       renderFinishedAt: Date.now(),
     });
+    return null;
+  },
+});
+
+export const releaseRender = mutation({
+  args: { secret: v.string(), clipId: v.id("clips") },
+  handler: async (ctx, { secret, clipId }) => {
+    assertWorker(secret);
+    const c = await ctx.db.get(clipId);
+    if (c?.renderStatus === "rendering") await ctx.db.patch(clipId, { renderStatus: "queued", renderProgress: 0 });
+    return null;
+  },
+});
+
+// Social post copy for a clip: caption + exactly 5 hashtags (editable).
+export const setPostCopy = mutation({
+  args: { clipId: v.id("clips"), caption: v.string(), hashtags: v.array(v.string()) },
+  handler: async (ctx, { clipId, caption, hashtags }) => {
+    await ownClip(ctx, clipId);
+    const tags = hashtags
+      .map((h) => "#" + h.replace(/^#+/, "").replace(/[^\p{L}\p{N}_]/gu, ""))
+      .filter((h) => h.length > 1)
+      .slice(0, 5);
+    await ctx.db.patch(clipId, { postCaption: caption.slice(0, 2200), hashtags: tags });
     return null;
   },
 });

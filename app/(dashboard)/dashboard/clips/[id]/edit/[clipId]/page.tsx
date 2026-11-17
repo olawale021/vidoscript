@@ -8,6 +8,7 @@ import { ArrowLeft, Download, Loader2, RotateCcw, Scissors } from "lucide-react"
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Button } from "@/components/ui/button";
+import { SaveVideoButton } from "@/components/save-video-button";
 import { cn } from "@/lib/utils";
 import { ClipComposition, clipDurationInFrames } from "@/remotion/Clip";
 import {
@@ -18,9 +19,12 @@ import {
   type CaptionStyle,
   type ClipAspect,
   type ClipCompositionProps,
+  type FitBackground,
+  type Framing,
   type SmartEdit,
 } from "@/types/clip";
 import { SmartPanel, SmartTimeline } from "./_components/smart-panel";
+import { PostCopy } from "./_components/post-copy";
 
 const fmt = (s: number) => {
   const m = Math.floor(s / 60);
@@ -110,6 +114,8 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
     captionStyle: CaptionStyle;
     captionPosition: CaptionPosition;
     cropX: number;
+    framing: Framing;
+    fitBackground: FitBackground;
   } | null>(null);
   const [captionDraft, setCaptionDraft] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -126,6 +132,8 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
         captionStyle: c.captionStyle ?? CLIP_DEFAULTS.captionStyle,
         captionPosition: c.captionPosition ?? CLIP_DEFAULTS.captionPosition,
         cropX: c.cropX ?? CLIP_DEFAULTS.cropX,
+        framing: c.framing ?? CLIP_DEFAULTS.framing,
+        fitBackground: c.fitBackground ?? CLIP_DEFAULTS.fitBackground,
       });
     }
   }, [data, s]);
@@ -166,6 +174,8 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
       captionStyle: s.captionStyle,
       captionPosition: s.captionPosition,
       cropX: s.cropX,
+      framing: s.framing,
+      fitBackground: s.fitBackground,
       words: wordsInClip,
       // AI shots live in R2; their signed URLs come with the editor data.
       smart: smart
@@ -209,12 +219,8 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {clip.renderStatus === "done" && data.outputUrl && !rendering && (
-            <a href={data.outputUrl} target="_blank" rel="noreferrer">
-              <Button variant="outline" size="sm">
-                <Download size={14} className="mr-1" /> Download MP4
-              </Button>
-            </a>
+          {clip.renderStatus === "done" && data.downloadUrl && !rendering && (
+            <SaveVideoButton downloadUrl={data.downloadUrl} fileName={`${s.title || "clip"}.mp4`} />
           )}
           <Button size="sm" disabled={rendering || saving} onClick={() => exportClip({ clipId })}>
             {rendering ? (
@@ -237,11 +243,25 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
           Export failed: {clip.renderError ?? "unknown error"}
         </div>
       )}
-      {clip.renderStatus === "done" && !rendering && (
-        <div className="text-xs text-neutral-500">
-          Exported settings are what you saw when you clicked Export. Change anything and click Re-export to update the MP4.
-        </div>
-      )}
+      {clip.renderStatus === "done" && !rendering && (() => {
+        const outAspect = clip.renderedAspect;
+        const outFraming = clip.renderedFraming;
+        const mismatch =
+          (outAspect && outAspect !== s.aspect) || (outFraming && s.aspect !== "16:9" && outFraming !== s.framing);
+        return mismatch ? (
+          <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-sm text-amber-200">
+            Your downloaded MP4 is <b>{outAspect}</b>
+            {outFraming && outAspect !== "16:9" ? ` (${outFraming === "fit" ? "full video" : "cropped"})` : ""}, but this
+            clip is now set to <b>{s.aspect}</b>
+            {s.aspect !== "16:9" ? ` (${s.framing === "fit" ? "full video" : "cropped"})` : ""}. Click <b>Re-export</b> to
+            update it — otherwise YouTube / TikTok will crop it.
+          </div>
+        ) : (
+          <div className="text-xs text-neutral-500">
+            MP4 ready{outAspect ? ` · ${outAspect}` : ""}. Change anything and click Re-export to update it.
+          </div>
+        );
+      })()}
 
       <div className="grid lg:grid-cols-[minmax(0,1fr)_380px] gap-6 items-start">
         <div className="flex justify-center rounded-lg border border-neutral-800 bg-neutral-950 p-4">
@@ -263,8 +283,19 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
         </div>
 
         <div className="space-y-5">
+          <PostCopy
+            clipId={clipId}
+            title={s.title}
+            hook={clip.hook}
+            transcript={captionText}
+            savedCaption={clip.postCaption}
+            savedHashtags={clip.hashtags}
+          />
+
           <SmartPanel
             clipId={clipId}
+            clipTitle={s.title}
+            words={data.words}
             smart={smart}
             status={clip.smartStatus}
             error={clip.smartError}
@@ -325,6 +356,28 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
             <h2 className="text-sm font-semibold text-neutral-300">Format</h2>
             <Segmented value={s.aspect} options={ASPECTS} onChange={(aspect) => setS({ ...s, aspect })} />
             {s.aspect !== "16:9" && (
+              <>
+                <Segmented
+                  value={s.framing}
+                  options={[
+                    { key: "fill" as Framing, label: "Fill (crop & follow face)" },
+                    { key: "fit" as Framing, label: "Fit (full video)" },
+                  ]}
+                  onChange={(framing) => setS({ ...s, framing })}
+                />
+                {s.framing === "fit" && (
+                  <Segmented
+                    value={s.fitBackground}
+                    options={[
+                      { key: "blur" as FitBackground, label: "Blurred background" },
+                      { key: "black" as FitBackground, label: "Black bars" },
+                    ]}
+                    onChange={(fitBackground) => setS({ ...s, fitBackground })}
+                  />
+                )}
+              </>
+            )}
+            {s.aspect !== "16:9" && s.framing === "fill" && (
               <label className="block text-xs text-neutral-500">
                 Frame position (left ↔ right)
                 <input

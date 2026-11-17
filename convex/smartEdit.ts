@@ -122,3 +122,13 @@ export const fail = mutation({
     return null;
   },
 });
+
+export const release = mutation({
+  args: { secret: v.string(), clipId: v.id("clips") },
+  handler: async (ctx, { secret, clipId }) => {
+    assertWorker(secret);
+    const c = await ctx.db.get(clipId);
+    if (c?.smartStatus === "processing") await ctx.db.patch(clipId, { smartStatus: "queued" });
+    return null;
+  },
+});

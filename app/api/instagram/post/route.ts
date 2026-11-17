@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPostByShortcode } from "@/lib/instagram";
+import { logAppError } from "@/lib/app-errors";
 
 export async function GET(req: NextRequest) {
   const shortcode = req.nextUrl.searchParams.get("shortcode");
@@ -16,6 +17,7 @@ export async function GET(req: NextRequest) {
     const data = await getPostByShortcode(shortcode);
     return NextResponse.json(data);
   } catch (error) {
+    logAppError("api/instagram/post", error);
     console.error("[API /instagram/post] Error:", error);
     return NextResponse.json(
       {

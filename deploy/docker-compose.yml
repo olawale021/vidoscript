@@ -105,6 +105,11 @@ services:
       NEXT_PUBLIC_CONVEX_URL: https://${API_HOST}
     # Remotion's Chrome needs more shared memory than Docker's 64 MB default.
     shm_size: 1gb
+    # Time for the worker to hand its current job back to the queue on deploy.
+    stop_grace_period: 20s
+    # Tiny init process (tini) as PID 1: reaps exited Chrome / ffmpeg children
+    # (they piled up as zombies) and forwards SIGTERM to the worker.
+    init: true
     depends_on:
       backend:
         condition: service_healthy

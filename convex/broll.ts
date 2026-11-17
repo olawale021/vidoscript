@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import { mutation, query, type QueryCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
-import { fileUrl, r2, storagePrefix } from "./r2";
+import { downloadUrl, fileUrl, r2, storagePrefix } from "./r2";
 
 // The user's own render row for a project. Admin load-test copies share the
 // projectId (loadTest: true) and are skipped so they never reach the UI.
@@ -55,7 +55,8 @@ export const getByProject = query({
     if (!render || render.userId !== identity.subject) return null;
 
     const outputUrl = await fileUrl(ctx, { key: render.outputKey, storageId: render.outputStorageId });
-    return { ...render, outputUrl };
+    const dl = render.outputKey ? await downloadUrl(render.outputKey, `broll-${projectId}.mp4`) : outputUrl;
+    return { ...render, outputUrl, downloadUrl: dl };
   },
 });
 

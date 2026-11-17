@@ -16,6 +16,7 @@ import {
   Search,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { SaveVideoButton } from "@/components/save-video-button";
 import { cn } from "@/lib/utils";
 import type { ScenePlan, Scene, Aspect } from "@/types/broll";
 import { BrollComposition, FPS, aspectDims, planDurationInFrames } from "@/remotion/Broll";
@@ -274,12 +275,12 @@ export function BrollPanel({ script, analysis, model, projectId, wide }: BrollPa
 
           {/* Export / render status */}
           <div className="flex items-center gap-2 flex-wrap">
-            {status === "done" && render?.outputUrl ? (
-              <a href={render.outputUrl} download={`broll-${projectId}.mp4`}>
-                <Button size="sm">
-                  <Download className="mr-1.5" size={14} /> Download MP4
-                </Button>
-              </a>
+            {status === "done" && (render?.downloadUrl || render?.outputUrl) ? (
+              <SaveVideoButton
+                downloadUrl={(render.downloadUrl ?? render.outputUrl)!}
+                fileName={`broll-${projectId}.mp4`}
+                variant="default"
+              />
             ) : (
               <Button size="sm" onClick={exportMp4} disabled={!projectId || rendering}>
                 {rendering ? <Loader2 className="mr-1.5 animate-spin" size={14} /> : <Film className="mr-1.5" size={14} />}

@@ -16,6 +16,7 @@ import ffmpegStatic from "ffmpeg-static";
 // Prefer the system ffmpeg in Docker (FFMPEG_PATH); ffmpeg-static locally.
 const ffmpegPath = process.env.FFMPEG_PATH || ffmpegStatic;
 import { selectComposition, renderMedia } from "@remotion/renderer";
+import { getBrowser, resetBrowser } from "./browser.mjs";
 import { api } from "../convex/_generated/api.js";
 
 // ── Tiny local file server (Range-capable) so Remotion can read segments ──
@@ -90,6 +91,22 @@ export async function renderClip({ convex, secret, serveUrl, job }) {
     const base = await ensureServer();
     const name = basename(segPath);
     served.set(name, segPath);
+
+    // Fit + blurred background: pre-blur a tiny copy with ffmpeg (fast) instead
+    // of decoding and blurring a second full-size video in Chrome (3x slower).
+    let blurName = null;
+    if ((job.framing ?? "fit") === "fit" && (job.fitBackground ?? "blur") === "blur" && job.aspect !== "16:9") {
+      const blurPath = join(dir, `blur-${job.id}.mp4`);
+      await ffmpeg([
+        "-i", segPath,
+        "-an",
+        "-vf", "scale=-2:240,crop=ih*9/16:ih,boxblur=8:2,eq=brightness=-0.22:saturation=1.2",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "30", "-pix_fmt", "yuv420p",
+        blurPath,
+      ]);
+      blurName = basename(blurPath);
+      served.set(blurName, blurPath);
+    }
     const inputProps = {
       videoUrl: `${base}/${encodeURIComponent(name)}`,
       videoOffsetSec: job.start, // the local segment starts at the clip start
@@ -100,9 +117,13 @@ export async function renderClip({ convex, secret, serveUrl, job }) {
       captionStyle: job.captionStyle,
       captionPosition: job.captionPosition,
       cropX: job.cropX,
+      framing: job.framing ?? "fit",
+      fitBackground: job.fitBackground ?? "blur",
+      blurVideoUrl: blurName ? `${base}/${encodeURIComponent(blurName)}` : null,
       words: job.words,
     };
-    const composition = await selectComposition({ serveUrl, id: "Clip", inputProps });
+    const puppeteerInstance = await getBrowser();
+    const composition = await selectComposition({ serveUrl, id: "Clip", inputProps, puppeteerInstance });
     const outPath = join(dir, `clip-${job.id}.mp4`);
     let last = -1;
     console.log(`[clip-render] ${job.id}: rendering ${composition.width}x${composition.height}, ${composition.durationInFrames} frames`);
@@ -110,8 +131,10 @@ export async function renderClip({ convex, secret, serveUrl, job }) {
       composition,
       serveUrl,
       codec: "h264",
+      x264Preset: "veryfast",
       outputLocation: outPath,
       inputProps,
+      puppeteerInstance,
       onProgress: ({ progress: p }) => {
         const pct = 10 + Math.round(p * 85);
         if (pct - last >= 5) {
@@ -121,6 +144,7 @@ export async function renderClip({ convex, secret, serveUrl, job }) {
       },
     });
     served.delete(name);
+    if (blurName) served.delete(blurName);
 
     // 3. Upload to R2.
     const { url, key } = await convex.mutation(api.clipEditor.generateRenderUpload, { secret, clipId: job.id });
@@ -128,6 +152,9 @@ export async function renderClip({ convex, secret, serveUrl, job }) {
     if (!res.ok) throw new Error(`Upload to R2 failed (${res.status})`);
     await convex.mutation(api.clipEditor.saveRender, { secret, clipId: job.id, key });
     console.log(`[clip-render] ${job.id}: done`);
+  } catch (e) {
+    await resetBrowser();
+    throw e;
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => {});
   }

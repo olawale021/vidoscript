@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveFootage, type ResolvedAsset } from "@/lib/pexels";
 import type { Aspect } from "@/types/broll";
+import { logAppError } from "@/lib/app-errors";
 
 // POST { queries: string[], aspect?, type? } -> { assets: (ResolvedAsset|null)[] }
 // Resolves several footage queries in one call (one per scene).
@@ -26,6 +27,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ assets });
   } catch (error) {
+    logAppError("api/broll/assets", error);
     console.error("Asset resolve error:", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Asset resolve failed" },

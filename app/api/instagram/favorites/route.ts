@@ -5,6 +5,7 @@ import {
   isFavorite,
   getTopPostsAcrossFavorites,
 } from "@/lib/instagram-cache";
+import { logAppError } from "@/lib/app-errors";
 
 // GET /api/instagram/favorites — list all favorites, or check one, or get top posts
 export async function GET(req: NextRequest) {
@@ -26,6 +27,7 @@ export async function GET(req: NextRequest) {
     const creators = await getFavoriteCreators();
     return NextResponse.json({ creators });
   } catch (error) {
+    logAppError("api/instagram/favorites", error);
     console.error("[API /instagram/favorites] Error:", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Failed to get favorites" },
@@ -45,6 +47,7 @@ export async function POST(req: NextRequest) {
     const isFav = await toggleFavorite(username);
     return NextResponse.json({ isFavorite: isFav, username });
   } catch (error) {
+    logAppError("api/instagram/favorites", error);
     console.error("[API /instagram/favorites] Error:", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Failed to toggle favorite" },

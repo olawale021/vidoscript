@@ -8,6 +8,7 @@ import { ArrowLeft, Download, Loader2, Pencil, Play, RotateCcw, Sparkles, Thumbs
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Button } from "@/components/ui/button";
+import { SaveVideoButton } from "@/components/save-video-button";
 import { cn } from "@/lib/utils";
 import { StatusLine } from "../_components/status";
 
@@ -243,12 +244,12 @@ export default function ClipSourcePage({ params }: { params: Promise<{ id: strin
                         <Pencil size={14} className="mr-1" /> Edit & export
                       </Button>
                     </Link>
-                    {c.renderStatus === "done" && c.outputUrl ? (
-                      <a href={c.outputUrl} target="_blank" rel="noreferrer">
-                        <Button size="sm" variant="outline">
-                          <Download size={14} className="mr-1" /> MP4
-                        </Button>
-                      </a>
+                    {c.renderStatus === "done" && c.downloadUrl ? (
+                      <SaveVideoButton
+                        downloadUrl={c.downloadUrl}
+                        fileName={`${c.title || "clip"}.mp4`}
+                        label={`MP4${c.renderedAspect ? ` · ${c.renderedAspect}` : ""}`}
+                      />
                     ) : c.renderStatus === "queued" || c.renderStatus === "rendering" ? (
                       <span className="text-xs text-amber-200 inline-flex items-center gap-1">
                         <Loader2 size={12} className="animate-spin" />

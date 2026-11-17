@@ -562,3 +562,63 @@ export async function planScenes(
 
   return JSON.parse(content);
 }
+
+// A text-to-video prompt for an AI B-roll cutaway, from what is being said at
+// that moment in the clip. Used by the clip editor's "AI shot" form.
+export async function suggestBrollPrompt(input: {
+  clipTitle: string;
+  spoken: string; // transcript around the cutaway
+  idea?: string; // existing cutaway content (template text / stock query)
+  aspect: string;
+  seconds: number;
+}): Promise<string> {
+  const model = getModel(false);
+  const prompt = `Write ONE prompt for an AI video generator (Kling / Wan) for a ${Math.round(input.seconds)}-second B-roll cutaway in a ${input.aspect} short-form video.
+
+Clip title: ${input.clipTitle}
+What the speaker says at this moment: "${input.spoken}"
+${input.idea ? `Planned cutaway idea: ${input.idea}` : ""}
+
+Rules:
+- Show something visual that illustrates what is being said (a concrete scene, object or action), not the speaker.
+- Describe subject, setting, lighting and one camera move (e.g. slow push-in, handheld, orbit, top-down).
+- Cinematic and realistic. No text, captions, logos, brands, real people's names or faces of celebrities.
+- 1–2 sentences, max 45 words. Return ONLY the prompt.`;
+  const result = await model.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
+  trackGemini(result, "clips.brollPrompt");
+  return result.response.text().trim().replace(/^["']|["']$/g, "").slice(0, 600);
+}
+
+// Social caption + exactly 5 hashtags for a short clip (clip editor).
+export async function writeClipPostCopy(input: {
+  title: string;
+  hook: string;
+  transcript: string;
+}): Promise<{ caption: string; hashtags: string[] }> {
+  const model = getModel(true);
+  const prompt = `Write the post copy for this short vertical video clip (TikTok / Reels / Shorts).
+
+Clip title: ${input.title}
+Hook: ${input.hook}
+What is said in the clip: "${input.transcript}"
+
+Return ONLY JSON: {"caption": string, "hashtags": [5 strings]}
+Caption rules:
+- First line is a scroll-stopping hook (max 12 words) based on the clip — not a copy of the title.
+- Then 1–2 short sentences that add context or curiosity, in a natural creator voice.
+- End with a light call to action or question to drive comments.
+- Under 300 characters total, max 2 emojis, no hashtags inside the caption.
+Hashtag rules:
+- EXACTLY 5 hashtags, each starting with #, no spaces, specific to the clip's topic and niche.
+- Mix: 2 niche-specific, 2 broader topic, 1 format/platform tag (e.g. #shorts or #fyp only if it fits).
+- No banned or spammy tags, no duplicates.`;
+  const result = await model.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
+  trackGemini(result, "clips.postCopy");
+  const parsed = JSON.parse(result.response.text()) as { caption?: string; hashtags?: unknown[] };
+  const tags = (Array.isArray(parsed.hashtags) ? parsed.hashtags : [])
+    .map((h) => "#" + String(h).replace(/^#+/, "").replace(/[^\p{L}\p{N}_]/gu, ""))
+    .filter((h, i, all) => h.length > 1 && all.indexOf(h) === i)
+    .slice(0, 5);
+  if (tags.length < 5) throw new Error("The AI returned too few hashtags — try again");
+  return { caption: String(parsed.caption ?? "").trim().slice(0, 2200), hashtags: tags };
+}

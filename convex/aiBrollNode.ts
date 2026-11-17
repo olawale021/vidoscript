@@ -107,7 +107,9 @@ export const generate = action({
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(`Higgsfield rejected the request (${res.status}): ${text.slice(0, 200)}`);
+      const message = `Higgsfield rejected the request (${res.status}): ${text.slice(0, 200)}`;
+      await ctx.runMutation(internal.errors.log, { feature: "clips.aiBroll", message, userId: uid, clipId });
+      throw new Error(message);
     }
     const sub = (await res.json()) as { request_id: string; status_url: string };
 
@@ -146,6 +148,12 @@ export const poll = internalAction({
   },
   handler: async (ctx, args): Promise<void> => {
     const fail = async (error: string): Promise<void> => {
+      await ctx.runMutation(internal.errors.log, {
+        feature: "clips.aiBroll",
+        message: error,
+        userId: args.userId,
+        clipId: args.clipId,
+      });
       await ctx.runMutation(internal.aiBroll.patchBroll, {
         clipId: args.clipId,
         brollId: args.brollId,

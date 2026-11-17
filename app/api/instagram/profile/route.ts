@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCachedProfile } from "@/lib/instagram-cache";
+import { logAppError } from "@/lib/app-errors";
 
 export async function GET(req: NextRequest) {
   const username = req.nextUrl.searchParams.get("username");
@@ -14,6 +15,7 @@ export async function GET(req: NextRequest) {
     console.log("[API /instagram/profile] Result:", profile.username, profile.pk);
     return NextResponse.json(profile);
   } catch (error) {
+    logAppError("api/instagram/profile", error);
     console.error("[API /instagram/profile] Error:", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Failed to look up user" },

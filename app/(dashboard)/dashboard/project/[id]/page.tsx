@@ -494,7 +494,7 @@ export default function ProjectWorkspacePage() {
 
   // Workspace
   return (
-    <div className="w-full flex flex-col h-[calc(100vh-2.5rem)]">
+    <div className="w-full flex flex-col lg:h-[calc(100dvh-2.5rem)]">
       {/* Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6 flex-shrink-0">
         <div className="flex items-center gap-3">
@@ -539,7 +539,7 @@ export default function ProjectWorkspacePage() {
       <div className="grid lg:grid-cols-5 gap-6 flex-1 min-h-0">
         {/* Left: Transcript & Analysis */}
         {focus !== "right" && (
-          <div className={cn("flex flex-col min-h-0 h-full", focus === "left" ? "lg:col-span-5" : "lg:col-span-2")}>
+          <div className={cn("flex flex-col min-h-0 h-full max-lg:h-[78dvh]", focus === "left" ? "lg:col-span-5" : "lg:col-span-2")}>
             <Tabs defaultValue="transcript" className="flex flex-col min-h-0 flex-1">
               <div className="flex items-center gap-2 mb-4 flex-shrink-0">
                 <TabsList className="flex-1">
@@ -604,7 +604,7 @@ export default function ProjectWorkspacePage() {
 
         {/* Right: Generated Script + B-roll */}
         {focus !== "left" && (
-          <div className={cn("flex flex-col min-h-0 h-full", focus === "right" ? "lg:col-span-5" : "lg:col-span-3")}>
+          <div className={cn("flex flex-col min-h-0 h-full max-lg:h-[78dvh]", focus === "right" ? "lg:col-span-5" : "lg:col-span-3")}>
             <Card className="h-full flex flex-col overflow-hidden">
               <Tabs defaultValue="script" className="flex flex-col min-h-0 flex-1">
                 <CardHeader className="border-b border-neutral-800 pb-4 flex-shrink-0">

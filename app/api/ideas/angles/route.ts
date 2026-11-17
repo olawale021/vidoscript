@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 import OpenAI from "openai";
 import { trackOpenAI } from "@/lib/ai-usage";
+import { logAppError } from "@/lib/app-errors";
 
 function getOpenAIClient() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -102,6 +103,7 @@ ${sourceText}`,
         })),
     });
   } catch (error) {
+    logAppError("api/ideas/angles", error);
     console.error("Angle generation error:", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Could not generate angles" },

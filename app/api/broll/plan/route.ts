@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import * as gemini from "@/lib/gemini";
 import * as openai from "@/lib/openai";
 import { validateScenePlan, type PlannerOptions } from "@/lib/broll";
+import { logAppError } from "@/lib/app-errors";
 
 function getProvider(model?: string) {
   return model === "gpt4o" ? openai : gemini;
@@ -51,6 +52,7 @@ export async function POST(request: NextRequest) {
     // `errors` here are non-fatal warnings (repaired issues); surface for the UI
     return NextResponse.json({ plan, warnings: errors });
   } catch (error) {
+    logAppError("api/broll/plan", error);
     console.error("Scene plan error:", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Planning failed" },

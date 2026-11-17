@@ -8,6 +8,7 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { api } from "../convex/_generated/api.js";
 import { trackFaces } from "./face-track.mjs";
+import { withAiRetry } from "./report.mjs";
 
 const GEMINI_MODEL = "gemini-2.5-flash";
 const PRICE = { input: 0.3, output: 2.5 }; // per 1M tokens — keep in sync with lib/ai-pricing.ts
@@ -70,7 +71,7 @@ Return ONLY JSON:
   "fillers": [{"from": wordIndex, "to": wordIndex, "reason": "filler"|"repeat"}],
   "zooms": [{"word": wordIndex, "seconds": 1.5-3, "scale": 1.1-1.25}],
   "highlights": [{"word": wordIndex, "emoji": "single emoji or null"}],
-  "broll": [{"word": wordIndex, "seconds": 2-4, "kind": "template"|"stock", "template": name, "props": {...}, "query": "stock search phrase"}],
+  "broll": [{"word": wordIndex, "seconds": 2-4, "kind": "template"|"stock", "template": name, "props": {...}, "query": "stock search phrase", "prompt": "AI video prompt for this moment"}],
   "hook": "max 8 words, scroll-stopping title shown in the first 2.5 s",
   "cta": "max 6 words call to action for the end, e.g. 'Follow for part 2'",
   "theme": "hype"|"tech"|"editorial"|"warm"
@@ -81,6 +82,7 @@ Rules:
 - zooms: 2-5 moments that deserve emphasis (punchlines, key claims, numbers). Spread them out.
 - highlights: 3-8 key words (numbers, strong nouns/verbs). Emoji only where it clearly fits; null otherwise.
 - broll: 1-3 cutaways where a visual helps (a number -> BigStat, a list -> BulletList, a contrast -> Comparison, scenery/atmosphere -> stock with a concrete query). Never in the first 2 seconds. Never invent statistics: only use numbers that are spoken.
+- Every broll item also gets "prompt": a 1–2 sentence text-to-video prompt (max 45 words) showing a concrete scene that illustrates what is said there — subject, setting, lighting, one camera move; cinematic, realistic; no text, logos or celebrity faces.
 - Templates you may use:
 ${catalog}
 - No markdown, no commentary.`;
@@ -111,7 +113,9 @@ async function aiPass(job, convex) {
     model: GEMINI_MODEL,
     generationConfig: { responseMimeType: "application/json" },
   });
-  const result = await model.generateContent({ contents: [{ role: "user", parts: [{ text: buildPrompt(job) }] }] });
+  const result = await withAiRetry(() =>
+    model.generateContent({ contents: [{ role: "user", parts: [{ text: buildPrompt(job) }] }] })
+  );
   const u = result.response.usageMetadata ?? {};
   const inputTokens = u.promptTokenCount ?? 0;
   const outputTokens = (u.candidatesTokenCount ?? 0) + (u.thoughtsTokenCount ?? 0);
@@ -196,16 +200,18 @@ export async function generateSmartEdit({ convex, job }) {
     const w = W(b.word);
     if (!w || w.s < job.start + 1.5) continue;
     const dur = r2(Math.max(1.5, Math.min(4, Number(b.seconds) || 2.5)));
+    const shotPrompt = typeof b.prompt === "string" && b.prompt.trim() ? b.prompt.trim().slice(0, 600) : undefined;
     if (b.kind === "stock" && typeof b.query === "string" && b.query.trim()) {
       const asset = await resolveStock(b.query.trim(), job.aspect).catch(() => null);
       broll.push({
         id: nid("br"), t: r2(w.s), dur, kind: "stock", query: b.query.trim(),
         assetUrl: asset?.url ?? null, assetType: "video", credit: asset?.credit ?? null,
+        prompt: shotPrompt,
         enabled: !!asset,
       });
     } else if (TEMPLATES[b.template] && b.props && typeof b.props === "object") {
       const ok = TEMPLATES[b.template].required.every((k) => b.props[k] !== undefined && b.props[k] !== null && b.props[k] !== "");
-      if (ok) broll.push({ id: nid("br"), t: r2(w.s), dur, kind: "template", template: b.template, props: b.props, enabled: true });
+      if (ok) broll.push({ id: nid("br"), t: r2(w.s), dur, kind: "template", template: b.template, props: b.props, prompt: shotPrompt, enabled: true });
     }
   }
 

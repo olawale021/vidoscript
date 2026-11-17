@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getMediaComments } from "@/lib/instagram";
+import { logAppError } from "@/lib/app-errors";
 
 export async function GET(req: NextRequest) {
   // Post shortcode (instagram.com/p/{shortcode}); Apify looks comments up by URL.
@@ -18,6 +19,7 @@ export async function GET(req: NextRequest) {
     const data = await getMediaComments(shortcode, nextMinId);
     return NextResponse.json(data);
   } catch (error) {
+    logAppError("api/instagram/comments", error);
     console.error("[API /instagram/comments] Error:", error);
     return NextResponse.json(
       {

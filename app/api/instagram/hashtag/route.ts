@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getHashtagFeed } from "@/lib/instagram";
+import { logAppError } from "@/lib/app-errors";
 
 export async function GET(req: NextRequest) {
   const tag = req.nextUrl.searchParams.get("tag");
@@ -17,6 +18,7 @@ export async function GET(req: NextRequest) {
     const data = await getHashtagFeed(tag, section, cursor);
     return NextResponse.json(data);
   } catch (error) {
+    logAppError("api/instagram/hashtag", error);
     console.error("[API /instagram/hashtag] Error:", error);
     return NextResponse.json(
       {

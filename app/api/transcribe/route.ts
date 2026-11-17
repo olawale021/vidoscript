@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { transcribeAudio } from "@/lib/openai";
+import { logAppError } from "@/lib/app-errors";
 
 const MAX_FILE_SIZE = 300 * 1024 * 1024; // 300MB
 
@@ -40,6 +41,7 @@ export async function POST(request: NextRequest) {
       wordCount: result.text.split(/\s+/).length,
     });
   } catch (error) {
+    logAppError("api/transcribe", error);
     console.error("Transcription error:", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Transcription failed" },

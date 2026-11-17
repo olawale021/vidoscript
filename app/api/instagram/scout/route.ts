@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { getTopPostsAcrossFavorites } from "@/lib/instagram-cache";
 import { trackOpenAI } from "@/lib/ai-usage";
+import { logAppError } from "@/lib/app-errors";
 
 function getOpenAIClient() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -65,6 +66,7 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json(analysis);
   } catch (error) {
+    logAppError("api/instagram/scout", error);
     console.error("[API /instagram/scout] Error:", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Failed to scout" },

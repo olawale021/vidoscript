@@ -103,7 +103,7 @@ export default function StyleBankPage() {
   };
 
   return (
-    <div className="w-full flex flex-col h-[calc(100vh-2.5rem)]">
+    <div className="w-full flex flex-col lg:h-[calc(100dvh-2.5rem)]">
       <div className="flex-shrink-0 mb-5">
         <h1 className="text-2xl font-medium mb-1">Style Bank</h1>
         <p className="text-base text-neutral-500">
@@ -181,7 +181,7 @@ export default function StyleBankPage() {
       </div>
 
       {/* Right: samples */}
-      <div className="lg:col-span-3 min-h-0 flex flex-col">
+      <div className="lg:col-span-3 min-h-0 flex flex-col max-lg:h-[78dvh]">
       <div className="flex items-center justify-between mb-3 flex-shrink-0">
         <span className="text-xs font-semibold tracking-widest uppercase text-neutral-500">
           {samples.length} sample{samples.length === 1 ? "" : "s"}

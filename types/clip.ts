@@ -4,6 +4,9 @@
 export type ClipAspect = "9:16" | "1:1" | "16:9";
 export type CaptionStyle = "bold" | "karaoke" | "clean" | "none";
 export type CaptionPosition = "top" | "middle" | "bottom";
+// fill = crop to the frame (with face tracking); fit = whole video, bars around it.
+export type Framing = "fill" | "fit";
+export type FitBackground = "black" | "blur";
 
 // A transcript word. Times are seconds into the source video.
 export interface ClipWord {
@@ -69,6 +72,7 @@ export interface SmartBroll {
   template?: string; // MotionTemplate (types/broll.ts)
   props?: Record<string, unknown>;
   query?: string; // stock search query
+  prompt?: string; // AI-written text-to-video prompt for an AI shot (suggested at generation)
   assetUrl?: string | null; // resolved stock video (Pexels links are permanent)
   assetKey?: string | null; // R2 key for an AI shot (signed URL resolved at read time)
   ai?: AiShot | null;
@@ -115,6 +119,11 @@ export interface ClipCompositionProps {
   captionStyle: CaptionStyle;
   captionPosition: CaptionPosition;
   cropX: number; // 0..1 manual horizontal focus (used when reframe is off)
+  framing: Framing;
+  fitBackground: FitBackground;
+  // Render-only: a tiny pre-blurred copy of the video (made by the worker with
+  // ffmpeg). Much cheaper than blurring full frames in Chrome.
+  blurVideoUrl?: string | null;
   words: ClipWord[]; // source seconds, within [start, end]
   smart: SmartEdit | null;
   [key: string]: unknown; // Remotion inputProps are Record<string, unknown>
@@ -133,4 +142,6 @@ export const CLIP_DEFAULTS = {
   captionStyle: "bold" as CaptionStyle,
   captionPosition: "bottom" as CaptionPosition,
   cropX: 0.5,
+  framing: "fit" as Framing, // whole video with bars (user preference); "fill" crops + follows the face
+  fitBackground: "blur" as FitBackground,
 };

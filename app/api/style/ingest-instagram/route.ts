@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 import { transcribeAudio } from "@/lib/openai";
 import { analyzeTranscript } from "@/lib/gemini";
+import { logAppError } from "@/lib/app-errors";
 
 const MAX_VIDEO_BYTES = 100 * 1024 * 1024; // reels are short; 100MB is generous
 
@@ -65,6 +66,7 @@ export async function POST(request: NextRequest) {
       title: `@${handle || "instagram"} reel`,
     });
   } catch (error) {
+    logAppError("api/style/ingest-instagram", error);
     console.error("Style ingest error:", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Ingest failed" },

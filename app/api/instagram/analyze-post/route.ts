@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { transcribeAudio } from "@/lib/openai";
 import { trackOpenAI } from "@/lib/ai-usage";
+import { logAppError } from "@/lib/app-errors";
 
 function getOpenAIClient() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -151,6 +152,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(analysis);
   } catch (error) {
+    logAppError("api/instagram/analyze-post", error);
     console.error("[API /instagram/analyze-post] Error:", error);
     return NextResponse.json(
       {

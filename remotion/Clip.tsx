@@ -197,6 +197,7 @@ const Captions: React.FC<{
 
 // ── Video layer: kept segments, reframe, zooms, jump-cut punch ──
 
+
 const VideoLayer: React.FC<{
   props: ClipCompositionProps;
   tl: Timeline;
@@ -229,25 +230,72 @@ const VideoLayer: React.FC<{
   // Jump-cut punch: alternate framing on every cut so cuts feel intentional.
   if (smart?.anim.cutPunch && tl.segments.length > 1 && segmentIndexAt(tl, o) % 2 === 1) zoom *= 1.08;
 
+  // One OffthreadVideo per kept segment, sharing a style.
+  const segments = (style: React.CSSProperties, muted = false) =>
+    tl.segments.map((seg, i) => {
+      const from = Math.round(seg.out * fps);
+      const dur = Math.max(1, Math.round((seg.e - seg.s) * fps));
+      return (
+        <Sequence key={i} from={from} durationInFrames={dur} premountFor={fps}>
+          <OffthreadVideo
+            src={props.videoUrl}
+            muted={muted}
+            trimBefore={Math.max(0, Math.round((seg.s - props.videoOffsetSec) * fps))}
+            style={style}
+          />
+        </Sequence>
+      );
+    });
+
+  // Fit: the whole video, centred, with black or blurred bars around it.
+  if (props.framing === "fit") {
+    return (
+      <AbsoluteFill>
+        {props.fitBackground === "blur" ? (
+          props.blurVideoUrl ? (
+            // Export: tiny pre-blurred video from the worker, just stretched.
+            <AbsoluteFill style={{ transform: "scale(1.15)" }}>
+              {tl.segments.map((seg, i) => (
+                <Sequence
+                  key={i}
+                  from={Math.round(seg.out * fps)}
+                  durationInFrames={Math.max(1, Math.round((seg.e - seg.s) * fps))}
+                  premountFor={fps}
+                >
+                  <OffthreadVideo
+                    src={props.blurVideoUrl!}
+                    muted
+                    trimBefore={Math.max(0, Math.round((seg.s - props.videoOffsetSec) * fps))}
+                    style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                  />
+                </Sequence>
+              ))}
+            </AbsoluteFill>
+          ) : (
+            // Preview: blur in the browser (GPU), muted so audio isn't doubled.
+            <AbsoluteFill style={{ transform: "scale(1.2)" }}>
+              {segments(
+                { width: "100%", height: "100%", objectFit: "cover", filter: "blur(40px) brightness(0.55) saturate(1.2)" },
+                true
+              )}
+            </AbsoluteFill>
+          )
+        ) : null}
+        <AbsoluteFill style={{ transform: `scale(${zoom})`, transformOrigin: "50% 50%" }}>
+          {segments({ width: "100%", height: "100%", objectFit: "contain" })}
+        </AbsoluteFill>
+      </AbsoluteFill>
+    );
+  }
+
+  // Fill: crop to the frame, following the face (or the manual crop).
   return (
     <AbsoluteFill style={{ transform: `scale(${zoom})`, transformOrigin: `${x * 100}% 40%` }}>
-      {tl.segments.map((seg, i) => {
-        const from = Math.round(seg.out * fps);
-        const dur = Math.max(1, Math.round((seg.e - seg.s) * fps));
-        return (
-          <Sequence key={i} from={from} durationInFrames={dur} premountFor={fps}>
-            <OffthreadVideo
-              src={props.videoUrl}
-              trimBefore={Math.max(0, Math.round((seg.s - props.videoOffsetSec) * fps))}
-              style={{
-                width: "100%",
-                height: "100%",
-                objectFit: "cover",
-                objectPosition: `${Math.max(0, Math.min(1, x)) * 100}% 50%`,
-              }}
-            />
-          </Sequence>
-        );
+      {segments({
+        width: "100%",
+        height: "100%",
+        objectFit: "cover",
+        objectPosition: `${Math.max(0, Math.min(1, x)) * 100}% 50%`,
       })}
     </AbsoluteFill>
   );

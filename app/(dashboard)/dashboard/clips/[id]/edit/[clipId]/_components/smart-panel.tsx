@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAction } from "convex/react";
 import { Clapperboard, Loader2, Plus, Sparkles, Wand2 } from "lucide-react";
 import { api } from "@/convex/_generated/api";
@@ -12,17 +12,63 @@ import { AI_VIDEO_MODELS, type AiVideoModel, type SmartBroll, type SmartEdit } f
 const errMsg = (e: unknown) =>
   e instanceof Error ? e.message.replace(/^.*Uncaught Error: /, "").split("\n")[0] : String(e);
 
+type ShotContext = { clipTitle: string; aspect: string; words: { w: string; s: number; e: number }[] };
+
+// What a cutaway already "says": template text or stock query, for the prompt writer.
+function brollIdea(item: SmartBroll): string {
+  if (item.query) return item.query;
+  const p = item.props ?? {};
+  const parts: string[] = [];
+  for (const k of ["title", "subtitle", "text", "quote", "label", "metric"]) if (typeof p[k] === "string") parts.push(p[k] as string);
+  if (p.value !== undefined) parts.unshift(String(p.value));
+  for (const k of ["lines", "items", "steps"]) if (Array.isArray(p[k])) parts.push((p[k] as unknown[]).map(String).join(", "));
+  return [item.template, ...parts].filter(Boolean).join(": ");
+}
+
 // Generate an AI B-roll shot (Higgsfield) for one B-roll item. Paid: shows the
-// price first and only runs on an explicit click.
-function AiShot({ clipId, item }: { clipId: Id<"clips">; item: SmartBroll }) {
+// price first and only runs on an explicit click. The prompt is suggested by AI
+// from what is said at that moment.
+function AiShot({ clipId, item, ctx }: { clipId: Id<"clips">; item: SmartBroll; ctx: ShotContext }) {
   const estimate = useAction(api.aiBrollNode.estimate);
   const generate = useAction(api.aiBrollNode.generate);
   const [open, setOpen] = useState(false);
-  const [prompt, setPrompt] = useState(item.ai?.prompt ?? item.query ?? String(item.props?.title ?? item.props?.text ?? ""));
+  const [prompt, setPrompt] = useState(item.ai?.prompt ?? item.prompt ?? "");
+  const [suggesting, setSuggesting] = useState(false);
+
+  const suggest = async () => {
+    setSuggesting(true);
+    setError(null);
+    try {
+      // What is said from 4 s before to 4 s after the cutaway.
+      const spoken = ctx.words
+        .filter((w) => w.e >= item.t - 4 && w.s <= item.t + item.dur + 4)
+        .map((w) => w.w)
+        .join(" ");
+      const res = await fetch("/api/clips/broll-prompt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clipTitle: ctx.clipTitle, spoken, idea: brollIdea(item), aspect: ctx.aspect, seconds: item.dur }),
+      });
+      const data = (await res.json()) as { prompt?: string; error?: string };
+      if (!res.ok || !data.prompt) throw new Error(data.error || "Could not suggest a prompt");
+      setPrompt(data.prompt);
+      setPrice(undefined);
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      setSuggesting(false);
+    }
+  };
   const [model, setModel] = useState<AiVideoModel>(item.ai?.model ?? "kling-3-std");
   const [price, setPrice] = useState<number | null | undefined>(undefined);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Opening the form with nothing written: suggest a prompt straight away.
+  useEffect(() => {
+    if (open && !prompt.trim() && !suggesting) void suggest();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   if (item.ai?.status === "generating") {
     return (
@@ -41,16 +87,27 @@ function AiShot({ clipId, item }: { clipId: Id<"clips">; item: SmartBroll }) {
   }
   return (
     <div className="ml-6 space-y-2 rounded border border-neutral-800 bg-neutral-900 p-2">
-      <textarea
-        value={prompt}
-        onChange={(e) => {
-          setPrompt(e.target.value);
-          setPrice(undefined);
-        }}
-        rows={2}
-        placeholder="Describe the shot, e.g. slow push-in on a busy coffee shop counter at sunrise"
-        className="w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-1 text-xs text-neutral-200"
-      />
+      <div className="relative">
+        <textarea
+          value={prompt}
+          onChange={(e) => {
+            setPrompt(e.target.value);
+            setPrice(undefined);
+          }}
+          rows={3}
+          disabled={suggesting}
+          placeholder={suggesting ? "Writing a prompt from what's said here…" : "Describe the shot, e.g. slow push-in on a busy coffee shop counter at sunrise"}
+          className="w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-1 text-xs text-neutral-200 disabled:opacity-60"
+        />
+        {suggesting && <Loader2 size={14} className="absolute right-2 top-2 animate-spin text-sky-300" />}
+      </div>
+      <button
+        onClick={suggest}
+        disabled={suggesting}
+        className="text-xs text-sky-300 hover:text-sky-200 inline-flex items-center gap-1 disabled:opacity-50"
+      >
+        <Sparkles size={12} /> {prompt.trim() ? "Suggest another" : "Suggest a prompt"}
+      </button>
       <div className="flex flex-wrap items-center gap-2">
         <select
           value={model}
@@ -159,6 +216,8 @@ function Row({ on, onToggle, children }: { on: boolean; onToggle: () => void; ch
 
 export function SmartPanel({
   clipId,
+  clipTitle,
+  words,
   smart,
   status,
   error,
@@ -169,6 +228,8 @@ export function SmartPanel({
   onRegenerate,
 }: {
   clipId: Id<"clips">;
+  clipTitle: string;
+  words: { w: string; s: number; e: number }[];
   smart: SmartEdit | null;
   status: string | undefined;
   error: string | null | undefined;
@@ -319,7 +380,7 @@ export function SmartPanel({
                       ? `Stock: ${b.query}`
                       : `Stock: ${b.query} (needs Pexels key)`}
               </Row>
-              <AiShot clipId={clipId} item={b} />
+              <AiShot clipId={clipId} item={b} ctx={{ clipTitle, aspect, words }} />
             </div>
           ))
         )}

@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import { internalMutation, mutation, query, type MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
-import { r2, storagePrefix } from "./r2";
+import { downloadUrl, r2, safeFileName, storagePrefix } from "./r2";
 import { assertWorker } from "./broll";
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -151,13 +151,21 @@ export const findMore = mutation({
 
 // Link: the user approved the estimated download size/cost.
 export const confirmDownload = mutation({
-  args: { sourceId: v.id("clipSources") },
-  handler: async (ctx, { sourceId }) => {
+  args: {
+    sourceId: v.id("clipSources"),
+    quality: v.optional(v.union(v.literal("360"), v.literal("480"), v.literal("720"), v.literal("1080"))),
+  },
+  handler: async (ctx, { sourceId, quality }) => {
     const userId = await requireUser(ctx);
     const source = await ctx.db.get(sourceId);
     if (!source || source.userId !== userId) throw new Error("Not found");
     if (source.status !== "confirm") return null;
-    await ctx.db.patch(sourceId, { status: "queued", progress: 2, updatedAt: Date.now() });
+    await ctx.db.patch(sourceId, {
+      status: "queued",
+      progress: 2,
+      downloadQuality: quality ?? "720",
+      updatedAt: Date.now(),
+    });
     return null;
   },
 });
@@ -226,6 +234,7 @@ export const list = query({
           channelName: s.channelName ?? null,
           estimateMb: s.estimateMb ?? null,
           estimateUsd: s.estimateUsd ?? null,
+          availableQualities: s.availableQualities ?? null,
           expiresAt: s.expiresAt,
           updatedAt: s.updatedAt,
         };
@@ -253,6 +262,7 @@ export const get = query({
       clips.map(async (c) => ({
         ...c,
         outputUrl: c.outputKey ? await r2.getUrl(c.outputKey, { expiresIn: 6 * 60 * 60 }) : null,
+        downloadUrl: c.outputKey ? await downloadUrl(c.outputKey, safeFileName(c.title)) : null,
       }))
     );
     return {
@@ -360,6 +370,7 @@ export const claimNext = mutation({
       sourceUrl: source.sourceUrl ?? null,
       durationSec: source.durationSec ?? null,
       findMore: !!source.findMore,
+      downloadQuality: source.downloadQuality ?? "720",
       // For links the file isn't in R2 yet; the worker uploads it, then signs a GET.
       videoUrl: isUrl ? null : await r2.getUrl(source.videoKey, { expiresIn: 6 * 60 * 60 }),
     };
@@ -439,6 +450,7 @@ export const setChecked = mutation({
     channelName: v.optional(v.string()),
     estimateMb: v.number(),
     estimateUsd: v.number(),
+    availableQualities: v.optional(v.array(v.string())),
   },
   handler: async (ctx, { secret, sourceId, ...meta }) => {
     assertWorker(secret);
@@ -614,5 +626,19 @@ export const requeueStuck = internalMutation({
     if (!s.findMore) await clearDerived(ctx, sourceId);
     await ctx.db.patch(sourceId, { status: "queued", updatedAt: Date.now() });
     return "requeued";
+  },
+});
+
+// Worker shutdown (deploy/restart): put an in-flight source back in the queue
+// right away instead of waiting for the 30-minute stale recovery.
+export const releaseSource = mutation({
+  args: { secret: v.string(), sourceId: v.id("clipSources") },
+  handler: async (ctx, { secret, sourceId }) => {
+    assertWorker(secret);
+    const s = await ctx.db.get(sourceId);
+    if (!s || s.status !== "processing") return null;
+    if (!s.findMore) await clearDerived(ctx, sourceId);
+    await ctx.db.patch(sourceId, { status: "queued", updatedAt: Date.now() });
+    return null;
   },
 });

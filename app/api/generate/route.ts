@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import * as gemini from "@/lib/gemini";
 import * as openai from "@/lib/openai";
+import { logAppError } from "@/lib/app-errors";
 
 function getProvider(model?: string) {
   return model === "gpt4o" ? openai : gemini;
@@ -150,6 +151,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ script });
   } catch (error) {
+    logAppError("api/generate", error);
     console.error("Generation error:", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Generation failed" },

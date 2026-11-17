@@ -200,6 +200,8 @@ export default defineSchema({
     channelName: v.optional(v.string()),
     estimateMb: v.optional(v.number()),
     estimateUsd: v.optional(v.number()),
+    availableQualities: v.optional(v.array(v.string())), // e.g. ["360","480","720","1080"]
+    downloadQuality: v.optional(v.union(v.literal("360"), v.literal("480"), v.literal("720"), v.literal("1080"))),
     durationSec: v.optional(v.number()),
     status: v.union(
       v.literal("uploading"),
@@ -248,6 +250,9 @@ export default defineSchema({
     reason: v.string(),
     score: v.number(), // 0..100
     text: v.string(), // transcript of the clip
+    // ── Social post copy (caption + exactly 5 hashtags) ──
+    postCaption: v.optional(v.string()),
+    hashtags: v.optional(v.array(v.string())),
     // ── User rating (feeds the clip finder's preferences) ──
     rating: v.optional(v.union(v.literal(1), v.literal(-1))),
     ratingReasons: v.optional(v.array(v.string())),
@@ -259,6 +264,8 @@ export default defineSchema({
     ),
     captionPosition: v.optional(v.union(v.literal("top"), v.literal("middle"), v.literal("bottom"))),
     cropX: v.optional(v.number()), // 0..1
+    framing: v.optional(v.union(v.literal("fill"), v.literal("fit"))),
+    fitBackground: v.optional(v.union(v.literal("black"), v.literal("blur"))),
     // User-edited caption words (absolute seconds), replacing transcript words
     // between captionRange.s and captionRange.e.
     captionWords: v.optional(v.array(v.object({ w: v.string(), s: v.number(), e: v.number() }))),
@@ -270,6 +277,9 @@ export default defineSchema({
     renderProgress: v.optional(v.number()),
     renderError: v.optional(v.union(v.string(), v.null())),
     outputKey: v.optional(v.string()),
+    // Format the current MP4 was rendered with (to flag stale exports).
+    renderedAspect: v.optional(v.string()),
+    renderedFraming: v.optional(v.string()),
     renderQueuedAt: v.optional(v.number()),
     renderStartedAt: v.optional(v.number()),
     renderFinishedAt: v.optional(v.number()),
@@ -301,6 +311,19 @@ export default defineSchema({
   })
     .index("by_created", ["createdAt"])
     .index("by_user_created", ["userId", "createdAt"]),
+
+  // Failures from the worker, Convex actions and the app, for Admin → Errors.
+  errorLogs: defineTable({
+    source: v.union(v.literal("worker"), v.literal("convex"), v.literal("app")),
+    feature: v.string(), // e.g. "clips.smartEdit"
+    message: v.string(),
+    kind: v.optional(v.string()), // "quota" | "rate_limit" | "auth" | "timeout" | "other"
+    userId: v.optional(v.string()),
+    clipId: v.optional(v.string()),
+    sourceId: v.optional(v.string()),
+    resolved: v.optional(v.boolean()),
+    createdAt: v.number(),
+  }).index("by_created", ["createdAt"]),
 
   // Server health heartbeats from the render worker (host /proc values).
   systemStats: defineTable({

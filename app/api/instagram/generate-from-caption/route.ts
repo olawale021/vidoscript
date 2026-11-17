@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { analyzeTranscript, generateScript } from "@/lib/openai";
+import { logAppError } from "@/lib/app-errors";
 
 export async function POST(request: NextRequest) {
   try {
@@ -29,6 +30,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ analysis, script });
   } catch (error) {
+    logAppError("api/instagram/generate-from-caption", error);
     console.error("[API /instagram/generate-from-caption] Error:", error);
     return NextResponse.json(
       {

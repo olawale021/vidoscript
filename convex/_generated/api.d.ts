@@ -15,6 +15,7 @@ import type * as broll from "../broll.js";
 import type * as clipEditor from "../clipEditor.js";
 import type * as clips from "../clips.js";
 import type * as crons from "../crons.js";
+import type * as errors from "../errors.js";
 import type * as ideas from "../ideas.js";
 import type * as instagram from "../instagram.js";
 import type * as library from "../library.js";
@@ -42,6 +43,7 @@ declare const fullApi: ApiFromModules<{
   clipEditor: typeof clipEditor;
   clips: typeof clips;
   crons: typeof crons;
+  errors: typeof errors;
   ideas: typeof ideas;
   instagram: typeof instagram;
   library: typeof library;

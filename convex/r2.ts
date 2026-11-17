@@ -1,3 +1,5 @@
+import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { R2 } from "@convex-dev/r2";
 import { components } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
@@ -47,4 +49,41 @@ export function extFromName(fileName: string | undefined, contentType: string | 
   if (contentType === "image/jpeg") return "jpg";
   if (contentType === "image/png") return "png";
   return fallback;
+}
+
+// ── Download links ──
+// A signed GET that tells the browser to SAVE the file (Content-Disposition:
+// attachment) instead of playing it — mobile browsers ignore <a download> on
+// cross-origin links like R2.
+
+let s3: S3Client | null = null;
+function s3Client() {
+  s3 ??= new S3Client({
+    region: "auto",
+    endpoint: process.env.R2_ENDPOINT,
+    credentials: {
+      accessKeyId: process.env.R2_ACCESS_KEY_ID ?? "",
+      secretAccessKey: process.env.R2_SECRET_ACCESS_KEY ?? "",
+    },
+  });
+  return s3;
+}
+
+export function safeFileName(name: string, ext = "mp4") {
+  const base = name.replace(/[^\p{L}\p{N} _-]/gu, "").replace(/\s+/g, " ").trim().slice(0, 80) || "clip";
+  return `${base}.${ext}`;
+}
+
+export async function downloadUrl(key: string, fileName: string, expiresIn = SIX_HOURS): Promise<string> {
+  const ascii = fileName.replace(/[^\x20-\x7e]/g, "_").replace(/"/g, "");
+  return await getSignedUrl(
+    s3Client(),
+    new GetObjectCommand({
+      Bucket: process.env.R2_BUCKET,
+      Key: key,
+      ResponseContentDisposition: `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+      ResponseContentType: "video/mp4",
+    }),
+    { expiresIn }
+  );
 }
