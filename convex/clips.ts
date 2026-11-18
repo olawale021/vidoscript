@@ -6,7 +6,7 @@ import { assertWorker } from "./broll";
 
 const DAY = 24 * 60 * 60 * 1000;
 const RETENTION_DAYS = 30;
-const MAX_UPLOAD_BYTES = 2 * 1024 ** 3; // 2 GB
+const MAX_UPLOAD_BYTES = 5 * 1024 ** 3; // 5 GB: the most R2 accepts in one PUT
 
 function extOf(fileName: string, contentType: string) {
   const m = fileName.toLowerCase().match(/\.([a-z0-9]{2,4})$/);
@@ -35,7 +35,7 @@ export const createUpload = mutation({
   handler: async (ctx, args) => {
     const userId = await requireUser(ctx);
     if (!args.contentType.startsWith("video/")) throw new Error("Please upload a video file");
-    if (args.sizeBytes > MAX_UPLOAD_BYTES) throw new Error("Video is larger than 2 GB");
+    if (args.sizeBytes > MAX_UPLOAD_BYTES) throw new Error("Video is larger than 5 GB");
 
     const now = Date.now();
     const sourceId = await ctx.db.insert("clipSources", {
@@ -81,32 +81,43 @@ export function youtubeUrl(input: string): string | null {
 
 // Pasted link: queue a source the worker downloads (convex/clips.ts claimNext →
 // render-worker/clip-download.mjs) before the normal ingest pipeline.
+// Shared by createFromUrl and the clip scout ("Clip this").
+export async function createLinkSource(
+  ctx: MutationCtx,
+  userId: string,
+  url: string,
+  extra: { title?: string; hints?: { start: number; end: number; label: string }[] } = {}
+) {
+  const clean = youtubeUrl(url);
+  if (!clean) throw new Error("That doesn't look like a YouTube video link");
+  const now = Date.now();
+  const sourceId = await ctx.db.insert("clipSources", {
+    userId,
+    title: extra.title?.slice(0, 200) || "YouTube video",
+    fileName: "youtube.mp4",
+    contentType: "video/mp4",
+    sizeBytes: 0,
+    videoKey: "",
+    sourceType: "url",
+    sourceUrl: clean,
+    rightsConfirmedAt: now,
+    status: "checking",
+    progress: 1,
+    error: null,
+    expiresAt: now + RETENTION_DAYS * DAY,
+    updatedAt: now,
+    ...(extra.hints?.length ? { hints: extra.hints.slice(0, 10) } : {}),
+  });
+  await ctx.db.patch(sourceId, { videoKey: `${storagePrefix()}/clips/${userId}/${sourceId}/source.mp4` });
+  return sourceId;
+}
+
 export const createFromUrl = mutation({
   args: { url: v.string(), rightsConfirmed: v.boolean() },
   handler: async (ctx, { url, rightsConfirmed }) => {
     const userId = await requireUser(ctx);
     if (!rightsConfirmed) throw new Error("Please confirm you own this video or have permission to use it");
-    const clean = youtubeUrl(url);
-    if (!clean) throw new Error("That doesn't look like a YouTube video link");
-    const now = Date.now();
-    const sourceId = await ctx.db.insert("clipSources", {
-      userId,
-      title: "YouTube video",
-      fileName: "youtube.mp4",
-      contentType: "video/mp4",
-      sizeBytes: 0,
-      videoKey: "",
-      sourceType: "url",
-      sourceUrl: clean,
-      rightsConfirmedAt: now,
-      status: "checking",
-      progress: 1,
-      error: null,
-      expiresAt: now + RETENTION_DAYS * DAY,
-      updatedAt: now,
-    });
-    await ctx.db.patch(sourceId, { videoKey: `${storagePrefix()}/clips/${userId}/${sourceId}/source.mp4` });
-    return sourceId;
+    return await createLinkSource(ctx, userId, url);
   },
 });
 
@@ -143,8 +154,52 @@ export const findMore = mutation({
     const userId = await requireUser(ctx);
     const source = await ctx.db.get(sourceId);
     if (!source || source.userId !== userId) throw new Error("Not found");
-    if (source.status !== "ready") throw new Error("Wait until the video has finished processing");
-    await ctx.db.patch(sourceId, { status: "queued", findMore: true, progress: 80, error: null, updatedAt: Date.now() });
+    const busyMore = (source.status === "queued" || source.status === "processing") && source.findMore;
+    if (source.status !== "ready" && !busyMore) throw new Error("Wait until the video has finished processing");
+    // The AI learns from ratings, so every clip shown must be rated first.
+    const unrated = (await ctx.db.query("clips").withIndex("by_source", (q) => q.eq("sourceId", sourceId)).collect()).filter(
+      (c) => !c.hidden && !c.rating
+    ).length;
+    if (unrated > 0) {
+      throw new Error(`Rate the ${unrated} unrated clip${unrated > 1 ? "s" : ""} first (👍 or 👎) so the AI knows what to look for.`);
+    }
+    await ctx.db.patch(sourceId, {
+      moreCount: (source.moreCount ?? 0) + 5,
+      ...(busyMore ? {} : { status: "queued", findMore: true, progress: 80 }),
+      error: null,
+      updatedAt: Date.now(),
+    });
+    return null;
+  },
+});
+
+// Replace a clip: it's hidden (kept as a 👎 with the reasons so the AI learns)
+// and the worker finds a different moment that takes its place in the list.
+export const replace = mutation({
+  args: { clipId: v.id("clips"), reasons: v.array(v.string()), note: v.optional(v.string()) },
+  handler: async (ctx, { clipId, reasons, note }) => {
+    const userId = await requireUser(ctx);
+    const clip = await ctx.db.get(clipId);
+    if (!clip || clip.userId !== userId) throw new Error("Not found");
+    if (clip.hidden) return null;
+    const source = await ctx.db.get(clip.sourceId);
+    if (!source) throw new Error("Not found");
+    const busyMore = (source.status === "queued" || source.status === "processing") && source.findMore;
+    if (source.status !== "ready" && !busyMore) throw new Error("Wait until the video has finished processing");
+    await ctx.db.patch(clipId, {
+      hidden: true,
+      replacing: true,
+      rating: -1,
+      ratingReasons: reasons.map((r) => r.slice(0, 60)).slice(0, 8),
+      ratingNote: note?.trim().slice(0, 500) || undefined,
+      ratedAt: Date.now(),
+    });
+    await ctx.db.patch(source._id, {
+      replaceIds: [...(source.replaceIds ?? []), clipId],
+      ...(busyMore ? {} : { status: "queued", findMore: true, progress: 80 }),
+      error: null,
+      updatedAt: Date.now(),
+    });
     return null;
   },
 });
@@ -154,14 +209,18 @@ export const confirmDownload = mutation({
   args: {
     sourceId: v.id("clipSources"),
     quality: v.optional(v.union(v.literal("360"), v.literal("480"), v.literal("720"), v.literal("1080"))),
+    downloader: v.optional(v.union(v.literal("auto"), v.literal("main"), v.literal("backup"), v.literal("premium"))),
   },
-  handler: async (ctx, { sourceId, quality }) => {
+  handler: async (ctx, { sourceId, quality, downloader }) => {
     const userId = await requireUser(ctx);
     const source = await ctx.db.get(sourceId);
     if (!source || source.userId !== userId) throw new Error("Not found");
     if (source.status !== "confirm") return null;
     await ctx.db.patch(sourceId, {
       status: "queued",
+      error: null,
+      downloader: downloader ?? "auto",
+      blocked: undefined,
       progress: 2,
       downloadQuality: quality ?? "720",
       updatedAt: Date.now(),
@@ -228,7 +287,13 @@ export const list = query({
           progress: s.progress,
           error: s.error ?? null,
           durationSec: s.durationSec ?? null,
-          clipCount: clips.length,
+          stepDetail: s.stepDetail ?? null,
+          downloadQuality: s.downloadQuality ?? null,
+          blocked: s.blocked ?? false,
+          clipCount: clips.filter((c) => !c.hidden).length,
+          unratedCount: clips.filter((c) => !c.hidden && !c.rating).length,
+          exportedCount: clips.filter((c) => !c.hidden && c.renderStatus === "done").length,
+          createdAt: s._creationTime,
           sourceType: s.sourceType ?? "upload",
           thumbnailUrl: s.thumbnailUrl ?? null,
           channelName: s.channelName ?? null,
@@ -250,10 +315,12 @@ export const get = query({
     if (!identity) return null;
     const source = await ctx.db.get(sourceId);
     if (!source || source.userId !== identity.subject) return null;
-    const clips = await ctx.db
-      .query("clips")
-      .withIndex("by_source", (q) => q.eq("sourceId", sourceId))
-      .collect();
+    const clips = (
+      await ctx.db
+        .query("clips")
+        .withIndex("by_source", (q) => q.eq("sourceId", sourceId))
+        .collect()
+    ).filter((c) => !c.hidden || c.replacing);
     const videoUrl =
       source.status === "uploading" || !source.videoKey
         ? null
@@ -268,7 +335,7 @@ export const get = query({
     return {
       ...source,
       videoUrl,
-      clips: withOutputs.sort((a, b) => b.score - a.score),
+      clips: withOutputs.sort((a, b) => (b.slotScore ?? b.score) - (a.slotScore ?? a.score)),
     };
   },
 });
@@ -371,6 +438,9 @@ export const claimNext = mutation({
       durationSec: source.durationSec ?? null,
       findMore: !!source.findMore,
       downloadQuality: source.downloadQuality ?? "720",
+      downloader: source.downloader ?? "auto",
+      hints: source.hints ?? [],
+      estimateMb: source.estimateMb ?? null,
       // For links the file isn't in R2 yet; the worker uploads it, then signs a GET.
       videoUrl: isUrl ? null : await r2.getUrl(source.videoKey, { expiresIn: 6 * 60 * 60 }),
     };
@@ -389,10 +459,18 @@ export const transcriptFor = query({
     const words = chunks.sort((a, b) => a.chunk - b.chunk).flatMap((c) => c.words);
     const existing = await ctx.db.query("clips").withIndex("by_source", (q) => q.eq("sourceId", sourceId)).collect();
     const source = await ctx.db.get(sourceId);
+    const replaceIds = source?.replaceIds ?? [];
     return {
       words,
       durationSec: source?.durationSec ?? null,
+      // Every clip (shown or replaced) is off-limits, so nothing overlaps.
       existing: existing.map((c) => ({ start: c.start, end: c.end, title: c.title })),
+      // Clips the creator rejected in this video, with their reasons.
+      rejected: existing
+        .filter((c) => c.hidden)
+        .map((c) => ({ start: c.start, end: c.end, title: c.title, reasons: c.ratingReasons ?? [], note: c.ratingNote ?? null })),
+      replaceIds,
+      more: source?.moreCount ?? (replaceIds.length ? 0 : 5),
     };
   },
 });
@@ -416,6 +494,7 @@ export const preferencesFor = query({
           hook: c.hook,
           seconds: Math.round(c.end - c.start),
           reasons: c.ratingReasons ?? [],
+          note: c.ratingNote ?? null,
           text: c.text.slice(0, 220),
         }));
     return { liked: pick(1), disliked: pick(-1) };
@@ -466,6 +545,26 @@ export const setChecked = mutation({
 });
 
 // Worker: signed PUT for a downloaded link, then a signed GET to process it.
+// Worker: every downloader failed at the picked quality. Back to the quality
+// picker with an explanation, so the user decides (never a silent downgrade).
+export const backToConfirm = mutation({
+  args: { secret: v.string(), sourceId: v.id("clipSources"), error: v.string() },
+  handler: async (ctx, { secret, sourceId, error }) => {
+    assertWorker(secret);
+    await ctx.db.patch(sourceId, {
+      status: "confirm",
+      step: undefined,
+      stepDetail: undefined,
+      progress: 0,
+      error: error.slice(0, 300),
+      blocked: true,
+      startedAt: undefined,
+      updatedAt: Date.now(),
+    });
+    return null;
+  },
+});
+
 export const downloadTarget = mutation({
   args: { secret: v.string(), sourceId: v.id("clipSources") },
   handler: async (ctx, { secret, sourceId }) => {
@@ -508,11 +607,13 @@ export const setStep = mutation({
     step: v.union(v.literal("downloading"), v.literal("extracting"), v.literal("transcribing"), v.literal("finding")),
     progress: v.number(),
     durationSec: v.optional(v.number()),
+    detail: v.optional(v.string()),
   },
-  handler: async (ctx, { secret, sourceId, step, progress, durationSec }) => {
+  handler: async (ctx, { secret, sourceId, step, progress, durationSec, detail }) => {
     assertWorker(secret);
     await ctx.db.patch(sourceId, {
       step,
+      stepDetail: detail?.slice(0, 160),
       progress: Math.max(0, Math.min(99, Math.round(progress))),
       ...(durationSec !== undefined ? { durationSec } : {}),
       updatedAt: Date.now(),
@@ -551,8 +652,11 @@ export const saveClips = mutation({
       })
     ),
     append: v.optional(v.boolean()), // "find more": keep existing clips
+    // Replace: the first clips fill these slots, in order; leftovers are restored.
+    replaced: v.optional(v.array(v.id("clips"))),
+    moreDone: v.optional(v.number()),
   },
-  handler: async (ctx, { secret, sourceId, clips, append }) => {
+  handler: async (ctx, { secret, sourceId, clips, append, replaced, moreDone }) => {
     assertWorker(secret);
     const source = await ctx.db.get(sourceId);
     if (!source) return null;
@@ -564,22 +668,52 @@ export const saveClips = mutation({
     }
     // Every new clip gets smart edits generated by the worker (convex/smartEdit.ts).
     const queuedAt = Date.now();
-    for (const c of clips) {
+    const slots = replaced ?? [];
+    // New clips start from the user's saved editor defaults (Settings).
+    const prefs = await ctx.db
+      .query("userSettings")
+      .withIndex("by_user", (q) => q.eq("userId", source.userId))
+      .first();
+    const editorDefaults = prefs
+      ? {
+          ...(prefs.defaultClipAspect ? { aspect: prefs.defaultClipAspect } : {}),
+          ...(prefs.defaultFraming ? { framing: prefs.defaultFraming } : {}),
+          ...(prefs.defaultFitBackground ? { fitBackground: prefs.defaultFitBackground } : {}),
+          ...(prefs.defaultCaptionStyle ? { captionStyle: prefs.defaultCaptionStyle } : {}),
+        }
+      : {};
+    let unfilled = 0;
+    for (let i = 0; i < slots.length; i++) {
+      const old = await ctx.db.get(slots[i]);
+      if (old) await ctx.db.patch(old._id, i < clips.length ? { replacing: false } : { replacing: false, hidden: false });
+      if (i >= clips.length) unfilled++;
+    }
+    for (let i = 0; i < clips.length; i++) {
+      const old = i < slots.length ? await ctx.db.get(slots[i]) : null;
       await ctx.db.insert("clips", {
-        ...c,
+        ...editorDefaults,
+        ...clips[i],
         sourceId,
         userId: source.userId,
         smartStatus: "queued",
         smartQueuedAt: queuedAt,
+        ...(old ? { replacesClipId: old._id, slotScore: old.slotScore ?? old.score } : {}),
       });
     }
+    // Requests that arrived while this job ran are picked up by the next run.
+    const fresh = (await ctx.db.get(sourceId))!;
+    const leftIds = (fresh.replaceIds ?? []).filter((id) => !slots.includes(id));
+    const leftMore = Math.max(0, (fresh.moreCount ?? 0) - (moreDone ?? 0));
+    const again = append && (leftIds.length > 0 || leftMore > 0);
     const now = Date.now();
     await ctx.db.patch(sourceId, {
-      status: "ready",
+      status: again ? "queued" : "ready",
       step: undefined,
-      progress: 100,
-      error: null,
-      findMore: undefined,
+      progress: again ? 80 : 100,
+      error: unfilled ? `Couldn't find a different moment for ${unfilled} clip${unfilled > 1 ? "s" : ""}, so ${unfilled > 1 ? "they were" : "it was"} kept.` : null,
+      findMore: again ? true : undefined,
+      replaceIds: leftIds.length ? leftIds : undefined,
+      moreCount: leftMore || undefined,
       finishedAt: now,
       updatedAt: now,
     });
@@ -595,7 +729,13 @@ export const fail = mutation({
     // A failed "find more" keeps the video ready with its existing clips.
     const src = await ctx.db.get(sourceId);
     if (src?.findMore) {
+      for (const id of src.replaceIds ?? []) {
+        const c = await ctx.db.get(id);
+        if (c) await ctx.db.patch(id, { hidden: false, replacing: false });
+      }
       await ctx.db.patch(sourceId, {
+        replaceIds: undefined,
+        moreCount: undefined,
         status: "ready",
         step: undefined,
         progress: 100,
@@ -640,5 +780,20 @@ export const releaseSource = mutation({
     if (!s.findMore) await clearDerived(ctx, sourceId);
     await ctx.db.patch(sourceId, { status: "queued", updatedAt: Date.now() });
     return null;
+  },
+});
+
+// Sidebar: is any of the user's videos being processed right now (live dot)?
+export const busyCount = query({
+  args: {},
+  handler: async (ctx) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) return 0;
+    const recent = await ctx.db
+      .query("clipSources")
+      .withIndex("by_user", (q) => q.eq("userId", identity.subject))
+      .order("desc")
+      .take(20);
+    return recent.filter((s) => s.status === "queued" || s.status === "processing" || s.status === "checking").length;
   },
 });

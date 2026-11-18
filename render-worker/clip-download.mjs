@@ -22,8 +22,8 @@ const JOHNVC = "johnvc~youtube-download-api";
 const MARIELISE = "marielise.dev~youtube-video-downloader";
 const LOOKUP_FALLBACK = "streamers~youtube-scraper";
 
-const MAX_SECONDS = 60 * 60; // 1 hour
-const MAX_BYTES = 4 * 1024 ** 3;
+const MAX_SECONDS = 3 * 60 * 60; // 3 hours
+const MAX_BYTES = 6 * 1024 ** 3;
 const RUN_CAP_USD = 2; // hard cap per Apify run (maxTotalChargeUsd)
 
 // USD (Apify FREE tier, Nov 2026)
@@ -34,28 +34,110 @@ const RESIDENTIAL_PER_MB = 0.05;
 const LOOKUP_FALLBACK_USD = 0.004;
 const MB_PER_MIN_720 = 16; // measured: a 63-min video was 1,044 MB at 720p
 
+// Apify's API sometimes returns a 502/503/504 (or the connection drops) for a
+// moment. Read requests (GET: polling a run, fetching results) are retried with
+// backoff; starting a run (POST) is not, since a retry could start a second,
+// paid download.
+const TRANSIENT = new Set([429, 500, 502, 503, 504]);
+const RETRY_DELAYS_MS = [2000, 5000, 10000, 20000, 30000];
+
 async function apify(path, init = {}) {
   const token = process.env.APIFY_TOKEN;
   if (!token) throw new Error("APIFY_TOKEN is not set for the worker");
-  const res = await fetch(`https://api.apify.com/v2${path}`, {
-    ...init,
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(init.headers ?? {}) },
-  });
-  if (!res.ok) throw new Error(`Apify ${path.split("?")[0]} failed (${res.status}): ${(await res.text()).slice(0, 200)}`);
-  return res.json();
+  const retryable = (init.method ?? "GET") === "GET";
+  const where = path.split("?")[0];
+  for (let attempt = 0; ; attempt++) {
+    let res;
+    try {
+      res = await fetch(`https://api.apify.com/v2${path}`, {
+        ...init,
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(init.headers ?? {}) },
+      });
+    } catch (e) {
+      if (retryable && attempt < RETRY_DELAYS_MS.length) {
+        console.warn(`[download] Apify ${where}: network error, retrying (${e instanceof Error ? e.message : e})`);
+        await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
+        continue;
+      }
+      throw new Error("Couldn't reach the video downloader (Apify). Please click Retry in a minute.");
+    }
+    if (res.ok) return res.json();
+    if (retryable && TRANSIENT.has(res.status) && attempt < RETRY_DELAYS_MS.length) {
+      console.warn(`[download] Apify ${where}: ${res.status}, retrying`);
+      await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
+      continue;
+    }
+    if (TRANSIENT.has(res.status)) {
+      throw new Error(`The video downloader (Apify) is having a temporary problem (${res.status}). Please click Retry in a few minutes.`);
+    }
+    // Plain-text detail only (some errors come back as HTML pages).
+    const detail = (await res.text()).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
+    throw new Error(`Apify ${where} failed (${res.status}): ${detail}`);
+  }
+}
+
+// Read the run's log to tell the user what's happening (the actors don't
+// report progress any other way). johnvc logs "attempt 4/6 status=blocked";
+// yt-dlp logs "[download]  45.3% of ~690.00MiB".
+async function runInsight(runId) {
+  const token = process.env.APIFY_TOKEN;
+  const res = await fetch(`https://api.apify.com/v2/actor-runs/${runId}/log`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }).catch(() => null);
+  if (!res?.ok) return null;
+  const text = await res.text();
+  const lines = text.trim().split("\n").filter(Boolean);
+  const lastTs = [...lines].reverse().map((l) => Date.parse(l.slice(0, 24))).find((t) => Number.isFinite(t)) ?? null;
+  const attempt = [...text.matchAll(/attempt (\d+)\/(\d+) status=(\w+)/g)].pop();
+  const pct = [...text.matchAll(/\[download\]\s+([\d.]+)% of\s+~?\s*([\d.]+)\s*(KiB|MiB|GiB)/g)].pop();
+  const unit = { KiB: 1 / 1024, MiB: 1, GiB: 1024 };
+  return {
+    lastActivity: lastTs,
+    attempt: attempt ? { n: Number(attempt[1]), of: Number(attempt[2]), status: attempt[3] } : null,
+    pct: pct ? Number(pct[1]) : null,
+    totalMb: pct ? Math.round(Number(pct[2]) * unit[pct[3]] * 1.048576) : null,
+    retrying: (text.match(/trying next fallback/g) ?? []).length,
+  };
+}
+
+const STALL_MS = 6 * 60 * 1000; // a working attempt can be silent ~4 min
+
+function describe(insight, elapsedSec) {
+  const mmss = `${Math.floor(elapsedSec / 60)}:${String(Math.floor(elapsedSec % 60)).padStart(2, "0")}`;
+  if (insight?.pct !== null && insight?.pct !== undefined) {
+    const done = insight.totalMb ? ` (${Math.round((insight.totalMb * insight.pct) / 100)} of ${insight.totalMb} MB)` : "";
+    return { text: `Downloading on Apify: ${Math.round(insight.pct)}%${done}`, frac: insight.pct / 100 };
+  }
+  if (insight?.attempt && insight.attempt.status !== "ok") {
+    return {
+      text: `YouTube is blocking the download, trying route ${insight.attempt.n} of ${insight.attempt.of}… (${mmss})`,
+      frac: null,
+    };
+  }
+  if (insight?.retrying) return { text: `Retrying a different way (${insight.retrying + 1})… (${mmss})`, frac: null };
+  return { text: `Downloading on Apify… (${mmss})`, frac: null };
 }
 
 async function runActor(actor, input, onWait = async () => {}) {
   let run = (
-    await apify(`/acts/${actor}/runs?waitForFinish=60&maxTotalChargeUsd=${RUN_CAP_USD}`, {
+    await apify(`/acts/${actor}/runs?waitForFinish=15&maxTotalChargeUsd=${RUN_CAP_USD}`, {
       method: "POST",
       body: JSON.stringify(input),
     })
   ).data;
+  const started = Date.now();
   for (let i = 0; run.status === "RUNNING" || run.status === "READY"; i++) {
-    if (i > 60) throw new Error("Download timed out");
-    await onWait(i);
-    run = (await apify(`/actor-runs/${run.id}?waitForFinish=60`)).data;
+    if (Date.now() - started > 2 * 60 * 60 * 1000) throw new Error("Download timed out");
+    const insight = await runInsight(run.id);
+    const elapsed = (Date.now() - started) / 1000;
+    // Nothing logged for a long time: the run is stuck (usually YouTube
+    // blocking it). Abort it so the next downloader gets a turn.
+    if (insight?.lastActivity && Date.now() - insight.lastActivity > STALL_MS && elapsed > STALL_MS / 1000) {
+      await apify(`/actor-runs/${run.id}/abort`, { method: "POST" }).catch(() => {});
+      throw new Error("The downloader stalled (YouTube was blocking it)");
+    }
+    await onWait(describe(insight, elapsed));
+    run = (await apify(`/actor-runs/${run.id}?waitForFinish=15`)).data;
   }
   if (run.status !== "SUCCEEDED") throw new Error(`Download failed (${run.status})`);
   const [item] = await apify(`/datasets/${run.defaultDatasetId}/items?clean=true`);
@@ -181,10 +263,13 @@ async function viaJohnvc(job, quality, onWait) {
   };
 }
 
-async function viaMarielise(job, quality, onWait) {
+// residential: "fallback" lets it use the paid residential proxy ($0.05/MB)
+// once free routes are blocked. Every run is capped at RUN_CAP_USD ($2): a
+// download that would cost more fails instead (the user's rule).
+async function viaMarielise(job, quality, onWait, { residential = "fallback" } = {}) {
   const item = await runActor(
     MARIELISE,
-    { urls: [{ url: job.sourceUrl }], quality, format: "default", residentialProxyMode: "fallback" },
+    { urls: [{ url: job.sourceUrl }], quality, format: "default", residentialProxyMode: residential },
     onWait
   );
   if (!item || item.status !== "success" || !item.downloadUrl) {
@@ -207,10 +292,21 @@ async function viaMarielise(job, quality, onWait) {
   };
 }
 
-const tooLarge = (e) => /too large|lower quality/i.test(e instanceof Error ? e.message : String(e));
+const RETRY_PAUSE_SEC = Number(process.env.DOWNLOAD_RETRY_PAUSE_SEC) || 120;
+
+// Every downloader failed at the picked quality (usually YouTube blocking).
+// The worker sends the video back to the quality picker instead of failing.
+export class QualityBlockedError extends Error {
+  constructor(quality, mode = "auto") {
+    const tried = { auto: "the main and backup downloaders", main: "the main downloader", backup: "the backup downloader", premium: "the backup downloader with the premium proxy" }[mode];
+    super(`YouTube blocked ${tried} at ${quality}p. Choose how to try next: wait and retry, another downloader, or a lower quality.`);
+    this.code = "QUALITY_BLOCKED";
+  }
+}
+
 
 // PUT a file to a presigned R2 URL with an explicit Content-Length (streamed).
-function putFile(url, path, size) {
+function putFile(url, path, size, onBytes = () => {}) {
   return new Promise((resolve, reject) => {
     const req = request(url, { method: "PUT", headers: { "Content-Type": "video/mp4", "Content-Length": size } }, (res) => {
       res.resume();
@@ -219,15 +315,31 @@ function putFile(url, path, size) {
       );
     });
     req.on("error", reject);
-    createReadStream(path).pipe(req);
+    let sent = 0;
+    const stream = createReadStream(path);
+    stream.on("data", (chunk) => {
+      sent += chunk.length;
+      onBytes(sent);
+    });
+    stream.pipe(req);
   });
 }
 
 export async function downloadLinkSource({ convex, secret, job }) {
-  const onWait = (i) =>
-    convex
-      .mutation(api.clips.setStep, { secret, sourceId: job.id, step: "downloading", progress: Math.min(4, 2 + i * 0.1) })
-      .catch(() => {});
+  const report = (detail, progress) =>
+    convex.mutation(api.clips.setStep, { secret, sourceId: job.id, step: "downloading", progress, detail }).catch(() => {});
+  let downloader = "";
+  const onWait = ({ text, frac }) => report(`${downloader}${text}`, frac !== null ? 1 + frac * 11 : 2);
+  // Report byte progress at most every 3 s.
+  const throttled = (fn) => {
+    let last = 0;
+    return (...args) => {
+      const now = Date.now();
+      if (now - last < 3000) return;
+      last = now;
+      fn(...args);
+    };
+  };
   const dir = await mkdtemp(join(tmpdir(), `dl-${job.id}-`));
   try {
     console.log(`[download] ${job.id}: ${job.sourceUrl}`);
@@ -235,28 +347,55 @@ export async function downloadLinkSource({ convex, secret, job }) {
     if (length !== null && length > MAX_SECONDS) throw new Error(`Videos longer than ${MAX_SECONDS / 60} min aren't supported`);
     const picked = ["1080", "720", "480", "360"].includes(job.downloadQuality) ? job.downloadQuality : "720";
 
-    // 1. johnvc at the picked quality (it already falls back to the best quality below).
+    // Only the quality the user picked is ever tried; a lower one is never
+    // swapped in silently (the user decides, see QualityBlockedError).
+    // 1. johnvc (cheap) → 2. marielise.dev backup → 3. johnvc again after a pause
+    //    (YouTube's blocking often clears within minutes).
     let found;
     let lastError;
-    try {
-      found = await viaJohnvc(job, picked, onWait);
-    } catch (e) {
-      lastError = e;
-      console.warn(`[download] ${job.id}: johnvc failed (${e instanceof Error ? e.message : e}); trying marielise.dev`);
-    }
-    // 2. marielise.dev from the picked quality down (only steps down on "too large").
-    if (!found) {
-      const ladder = ["1080", "720", "480", "360"];
-      for (const q of ladder.slice(ladder.indexOf(picked))) {
-        try {
-          found = await viaMarielise(job, q, onWait);
-          break;
-        } catch (e) {
-          lastError = e;
-          if (!tooLarge(e)) break;
-          console.warn(`[download] ${job.id}: marielise too large at ${q}p, trying lower`);
-        }
+    const attempt = async (label, fn) => {
+      try {
+        found = await fn();
+      } catch (e) {
+        lastError = e;
+        console.warn(`[download] ${job.id}: ${label} failed (${e instanceof Error ? e.message : e})`);
       }
+    };
+    const mode = job.downloader ?? "auto";
+    if (mode === "main") {
+      await report("Main downloader…", 1);
+      await attempt("johnvc", () => viaJohnvc(job, picked, onWait));
+    } else if (mode === "backup") {
+      downloader = "Backup downloader · ";
+      await report(`${downloader}starting…`, 1);
+      await attempt("marielise", () => viaMarielise(job, picked, onWait, { residential: "disabled" }));
+    } else if (mode === "premium") {
+      downloader = "Backup + premium proxy · ";
+      await report(`${downloader}starting…`, 1);
+      await attempt("marielise premium", () => viaMarielise(job, picked, onWait, { residential: "fallback" }));
+    } else {
+      await report("Starting the downloader…", 1);
+      await attempt("johnvc", () => viaJohnvc(job, picked, onWait));
+      if (!found) {
+        downloader = "Backup downloader · ";
+        await report(`${downloader}starting…`, 2);
+        await attempt("marielise", () => viaMarielise(job, picked, onWait));
+      }
+      if (!found) {
+        downloader = "";
+        for (let s = RETRY_PAUSE_SEC; s > 0; s -= 15) {
+          await report(`YouTube is blocking ${picked}p downloads right now. Trying again in ${Math.ceil(s / 60)} min…`, 2);
+          await new Promise((r) => setTimeout(r, 15000));
+        }
+        downloader = "Second try · ";
+        await attempt("johnvc (second try)", () => viaJohnvc(job, picked, onWait));
+      }
+    }
+    // A video that can't be downloaded at all, or a setup problem (bad key),
+    // is a real failure; anything else is treated as YouTube blocking.
+    const hardFail = /\bprivate\b|\bremoved\b|age-restricted|members-only|\blive stream\b|\(40[13]\)|token/i;
+    if (!found && !hardFail.test(String(lastError?.message ?? ""))) {
+      throw new QualityBlockedError(picked, mode);
     }
     if (!found) throw lastError ?? new Error("Download failed");
     if (!found.duration && length) found.duration = length;
@@ -265,17 +404,35 @@ export async function downloadLinkSource({ convex, secret, job }) {
     const path = join(dir, "source.mp4");
     const res = await fetch(found.downloadUrl);
     if (!res.ok || !res.body) throw new Error(`Could not fetch the downloaded video (${res.status})`);
-    await pipeline(Readable.fromWeb(res.body), createWriteStream(path));
+    const total = Number(res.headers.get("content-length")) || 0;
+    let got = 0;
+    const fetchProgress = throttled(() =>
+      report(
+        total
+          ? `Copying to our server: ${Math.round(got / 1e6)} of ${Math.round(total / 1e6)} MB`
+          : `Copying to our server: ${Math.round(got / 1e6)} MB`,
+        total ? 12 + (got / total) * 5 : 13
+      )
+    );
+    const body = Readable.fromWeb(res.body);
+    body.on("data", (chunk) => {
+      got += chunk.length;
+      fetchProgress();
+    });
+    await pipeline(body, createWriteStream(path));
     const { size } = await stat(path);
     const { usd, units } = found.cost(size);
     recordCost(convex, job, found.actor, usd, units, "clips.youtubeDownload");
     if (size < 1000) throw new Error("Downloaded file is empty");
-    if (size > MAX_BYTES) throw new Error("Video is larger than 4 GB");
+    if (size > MAX_BYTES) throw new Error("Video is larger than 6 GB. Pick a lower quality.");
     if (found.duration > MAX_SECONDS) throw new Error(`Videos longer than ${MAX_SECONDS / 60} min aren't supported`);
 
     // 4. Copy into R2 at the source's key.
     const { putUrl } = await convex.mutation(api.clips.downloadTarget, { secret, sourceId: job.id });
-    await putFile(putUrl, path, size);
+    const saveProgress = throttled((sent) =>
+      report(`Saving to storage: ${Math.round(sent / 1e6)} of ${Math.round(size / 1e6)} MB`, 17 + (sent / size) * 2)
+    );
+    await putFile(putUrl, path, size, saveProgress);
     const { videoUrl } = await convex.mutation(api.clips.setDownloaded, {
       secret,
       sourceId: job.id,

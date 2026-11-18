@@ -4,6 +4,10 @@ import { ScenePlan } from "../types/broll";
 import { BrollComposition, FPS, aspectDims, planDurationInFrames } from "./Broll";
 import { ClipComposition, clipDurationInFrames } from "./Clip";
 import { CLIP_DEFAULTS, CLIP_DIMS, CLIP_FPS, type ClipCompositionProps } from "../types/clip";
+import { StoryComposition } from "./Story";
+import { STORY_DIMS, STORY_FPS, storyDurationInFrames, type StoryCompositionProps } from "../types/story";
+
+const EMPTY_STORY: StoryCompositionProps = { shots: [], aspect: "9:16", captionStyle: "bold", hook: null };
 
 const EMPTY_PLAN: ScenePlan = {
   version: 1,
@@ -64,6 +68,20 @@ export const RemotionRoot: React.FC = () => (
           width: dims.width,
           height: dims.height,
         };
+      }}
+    />
+    <Composition
+      id="Story"
+      component={StoryComposition}
+      defaultProps={EMPTY_STORY}
+      fps={STORY_FPS}
+      durationInFrames={150}
+      width={1080}
+      height={1920}
+      calculateMetadata={({ props }) => {
+        const p = props as StoryCompositionProps;
+        const dims = STORY_DIMS[p.aspect] ?? STORY_DIMS["9:16"];
+        return { durationInFrames: storyDurationInFrames(p), fps: STORY_FPS, width: dims.width, height: dims.height };
       }}
     />
   </>

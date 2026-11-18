@@ -5,93 +5,163 @@ import Link from "next/link";
 import { useQuery } from "convex/react";
 import { ArrowLeft, Loader2 } from "lucide-react";
 import { api } from "@/convex/_generated/api";
-import { Panel, Stat, Table, ago, duration, usd } from "../../_components/bits";
+import { Panel, PanelHeader, StatRow, Tone } from "@/components/ui/kit";
+import { Dot, Initials, Note, Status, Table, ago, clock, duration, usd } from "../../_components/bits";
 import { useUserProfiles } from "../../_components/use-user-profiles";
-
-const statusColor = (s: string) =>
-  s === "failed" ? "text-red-300" : s === "done" || s === "ready" ? "text-emerald-300" : "text-amber-200";
 
 export default function AdminUserDetailPage({ params }: { params: Promise<{ userId: string }> }) {
   const { userId } = use(params);
   const data = useQuery(api.admin.userDetail, { userId });
   const profile = useUserProfiles([userId])[userId];
 
-  if (data === undefined) return <Loader2 className="animate-spin text-neutral-500" />;
+  if (data === undefined) return <Loader2 className="animate-spin text-faint" />;
+
+  const name = profile?.name ?? profile?.email ?? userId;
+  const failed = data.renders.filter((r) => r.status === "failed").length;
+  const titles = new Map(data.projects.map((p) => [p.id as string, p.title]));
+  const lastActive = Math.max(
+    0,
+    ...data.projects.map((p) => p.updatedAt),
+    ...data.renders.map((r) => r.updatedAt),
+    ...data.library.map((l) => l.createdAt),
+    ...data.ai.recent.map((u) => u.createdAt)
+  );
+
+  // Projects and renders in one list, newest first.
+  const items = [
+    ...data.projects.map((p) => ({
+      key: `p-${p.id}`,
+      title: p.title,
+      sub: null as string | null,
+      type: "Project",
+      status: p.status,
+      error: p.error,
+      duration: "—",
+      updatedAt: p.updatedAt,
+    })),
+    ...data.renders.map((r) => ({
+      key: `r-${r.id}`,
+      title: titles.get(r.projectId as string) ?? "Render",
+      sub: r.id as string,
+      type: "Render",
+      status: r.status,
+      error: r.error ?? null,
+      duration: r.startedAt && r.finishedAt ? duration((r.finishedAt - r.startedAt) / 1000) : "—",
+      updatedAt: r.updatedAt,
+    })),
+  ].sort((a, b) => b.updatedAt - a.updatedAt);
 
   return (
-    <div className="space-y-5">
-      <div>
-        <Link href="/dashboard/admin/users" className="text-sm text-neutral-500 hover:text-white inline-flex items-center gap-1">
-          <ArrowLeft size={14} /> Users
-        </Link>
-        <h2 className="text-xl font-semibold text-white mt-2">{profile?.name ?? profile?.email ?? userId}</h2>
-        <div className="text-sm text-neutral-500">
-          {profile?.email && <span>{profile.email} · </span>}
-          <span className="font-mono text-xs">{userId}</span>
+    <div className="grid grid-cols-[minmax(0,1fr)] gap-4">
+      <Link href="/dashboard/admin/users" className="inline-flex w-fit items-center gap-1.5 text-[13px] text-faint hover:text-fg">
+        <ArrowLeft size={14} /> Users
+      </Link>
+
+      <div className="flex flex-wrap items-center gap-3.5">
+        <Initials id={userId} text={name} size={48} />
+        <div className="min-w-0">
+          <h2 className="break-words text-[22px] font-semibold">{name}</h2>
+          <p className="flex flex-wrap items-center gap-x-1.5 text-[13px] text-faint">
+            {profile?.email && profile.name && <span className="break-all">{profile.email} ·</span>}
+            <span className="max-w-full truncate rounded-md border border-line px-1.5 py-px font-mono text-xs">{userId}</span>
+          </p>
         </div>
+        {failed > 0 && (
+          <Tone tone="bad" className="sm:ml-auto">
+            {failed} failed render{failed === 1 ? "" : "s"}
+          </Tone>
+        )}
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <Stat label="Projects" value={data.projects.length} />
-        <Stat label="Renders" value={data.renders.length} />
-        <Stat label="Library items" value={data.library.length} />
-        <Stat label="AI cost" value={usd(data.ai.costUsd)} sub={`${data.ai.calls} calls`} />
-      </div>
+      <StatRow
+        items={[
+          { k: "Projects", v: data.projects.length },
+          { k: "Renders", v: data.renders.length },
+          { k: "Library items", v: data.library.length },
+          { k: "AI cost", v: usd(data.ai.costUsd), d: `${data.ai.calls} calls`, flat: true },
+          { k: "Last active", v: lastActive ? ago(lastActive).replace(" ago", "") : "—", d: lastActive ? "ago" : undefined, flat: true },
+        ]}
+      />
 
-      <Panel title="Projects (latest 50)">
-        <Table
-          head={["Title", "Status", "Updated"]}
-          empty="No projects."
-          rows={data.projects.map((p) => [
-            <div key="t">
-              <div className="text-neutral-200">{p.title}</div>
-              {p.error && <div className="text-xs text-red-300 break-all">{p.error}</div>}
-            </div>,
-            <span key="s" className={statusColor(p.status)}>{p.status}</span>,
-            ago(p.updatedAt),
-          ])}
-        />
-      </Panel>
-
-      <Panel title="Renders (latest 50)">
-        <Table
-          head={["Render", "Status", "Duration", "Updated"]}
-          empty="No renders."
-          rows={data.renders.map((r) => [
-            <div key="r">
-              <div className="font-mono text-xs text-neutral-400">{r.id}</div>
-              {r.error && <div className="text-xs text-red-300 break-all">{r.error}</div>}
-            </div>,
-            <span key="s" className={statusColor(r.status)}>{r.status}</span>,
-            r.startedAt && r.finishedAt ? duration((r.finishedAt - r.startedAt) / 1000) : "—",
-            ago(r.updatedAt),
-          ])}
-        />
-      </Panel>
-
-      <div className="grid lg:grid-cols-2 gap-5">
-        <Panel title="Library (latest 50)">
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+        <Panel>
+          <PanelHeader title="Projects and renders">
+            <Note>Latest 50 each</Note>
+          </PanelHeader>
           <Table
-            head={["Item", "Status", "Added"]}
-            empty="No library items."
-            rows={data.library.map((l) => [
-              <div key="l">
-                <div className="text-neutral-200">{l.creatorHandle ? `@${l.creatorHandle}` : l.source}</div>
-                {l.error && <div className="text-xs text-red-300 break-all">{l.error}</div>}
+            cols={[
+              { label: "Item" },
+              { label: "Type" },
+              { label: "Status" },
+              { label: "Duration", num: true },
+              { label: "Updated", num: true },
+            ]}
+            empty="No projects or renders."
+            rows={items.map((it) => ({
+              key: it.key,
+              cells: [
+                <div key="t" className="min-w-0">
+                  <div className="text-fg">{it.title}</div>
+                  {it.sub && <div className="font-mono text-[11px] text-faint">{it.sub}</div>}
+                  {it.error && <div className="break-all font-mono text-[11px] text-bad">{it.error}</div>}
+                </div>,
+                it.type,
+                <Status key="s" s={it.status} />,
+                <span key="d" className="font-mono">{it.duration}</span>,
+                ago(it.updatedAt),
+              ],
+            }))}
+          />
+        </Panel>
+
+        <Panel>
+          <PanelHeader title="Recent AI calls" />
+          {data.ai.recent.length === 0 ? (
+            <div className="px-4 py-8 text-center text-sm text-faint">No AI calls.</div>
+          ) : (
+            <ul className="grid">
+              {data.ai.recent.map((u, i) => (
+                <li
+                  key={i}
+                  className="grid grid-cols-[44px_12px_minmax(0,1fr)] items-start gap-2.5 border-t border-line px-4 py-[9px] text-[13px] first:border-t-0"
+                >
+                  <time className="pt-0.5 font-mono text-[11px] text-faint" title={new Date(u.createdAt).toLocaleString()}>
+                    {Date.now() - u.createdAt < 86400_000 ? clock(u.createdAt) : ago(u.createdAt).replace(" ago", "")}
+                  </time>
+                  <Dot className="mt-[5px]" />
+                  <div className="min-w-0">
+                    {u.feature}
+                    <small className="block break-all font-mono text-xs text-faint">
+                      {u.model} · {usd(u.costUsd)}
+                    </small>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Panel>
+      </div>
+
+      <Panel>
+        <PanelHeader title="Library">
+          <Note>Latest 50</Note>
+        </PanelHeader>
+        <Table
+          cols={[{ label: "Item" }, { label: "Status" }, { label: "Added", num: true }]}
+          empty="No library items."
+          rows={data.library.map((l) => ({
+            key: l.id as string,
+            cells: [
+              <div key="l" className="min-w-0">
+                <div className="text-fg">{l.creatorHandle ? `@${l.creatorHandle}` : l.source}</div>
+                {l.error && <div className="break-all font-mono text-[11px] text-bad">{l.error}</div>}
               </div>,
-              <span key="s" className={statusColor(l.status)}>{l.status}</span>,
+              <Status key="s" s={l.status} />,
               ago(l.createdAt),
-            ])}
-          />
-        </Panel>
-        <Panel title="Recent AI calls">
-          <Table
-            head={["Feature", "Model", "Cost", "When"]}
-            empty="No AI calls."
-            rows={data.ai.recent.map((u) => [u.feature, u.model, usd(u.costUsd), ago(u.createdAt)])}
-          />
-        </Panel>
-      </div>
+            ],
+          }))}
+        />
+      </Panel>
     </div>
   );
 }

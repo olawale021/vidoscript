@@ -17,6 +17,7 @@ import { getBrowser, resetBrowser } from "./browser.mjs";
 import { api } from "../convex/_generated/api.js";
 import { processClipSource } from "./clip-ingest.mjs";
 import { renderClip } from "./clip-render.mjs";
+import { runStoryJob } from "./story.mjs";
 import { generateSmartEdit } from "./smart-edit.mjs";
 import { checkLinkSource, downloadLinkSource } from "./clip-download.mjs";
 import { reportError } from "./report.mjs";
@@ -56,6 +57,7 @@ let currentRenderId = null;
 let clipBusy = false;
 // Jobs currently held, so a shutdown can hand them back to the queue.
 const held = { source: null, smart: null, render: null };
+const heldStory = new Set(); // story job ids
 let stopping = false;
 let clipRenderBusy = false;
 let smartBusy = false;
@@ -175,6 +177,11 @@ async function processClips() {
     }
     await processClipSource({ convex, secret: SECRET, job });
   } catch (e) {
+    if (e?.code === "QUALITY_BLOCKED") {
+      console.warn(`[worker] ${job.id}: ${e.message}`);
+      await convex.mutation(api.clips.backToConfirm, { secret: SECRET, sourceId: job.id, error: e.message }).catch(() => {});
+      return true;
+    }
     console.error(`[worker] clip source failed for ${job.id}:`, e);
     reportError(convex, {
       feature: job.findMore ? "clips.findMore" : job.sourceType === "url" ? "clips.youtube" : "clips.ingest",
@@ -255,11 +262,59 @@ async function shutdown(signal) {
   if (held.source) tasks.push(convex.mutation(api.clips.releaseSource, { secret: SECRET, sourceId: held.source }));
   if (held.smart) tasks.push(convex.mutation(api.smartEdit.release, { secret: SECRET, clipId: held.smart }));
   if (held.render) tasks.push(convex.mutation(api.clipEditor.releaseRender, { secret: SECRET, clipId: held.render }));
+  for (const jobId of heldStory) tasks.push(convex.mutation(api.storyWorker.releaseJob, { secret: SECRET, jobId }));
   await Promise.allSettled(tasks);
   process.exit(0);
 }
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
+
+// ── Story Studio jobs (render-worker/story.mjs) ──
+// AI steps (script, plan, images, voice) run in two background lanes so a long
+// export never blocks them; story exports run in the main loop like clip exports.
+const STORY_AI_KINDS = ["script", "plan", "ref", "still", "voice"];
+
+async function processStoryJob(kinds) {
+  const job = await convex.mutation(api.storyWorker.claimJob, { secret: SECRET, kinds });
+  if (!job) return false;
+  if (job.skip) return true;
+  heldStory.add(job.jobId);
+  const label = `${job.kind} ${job.shotId ?? job.item?.id ?? job.storyId}`;
+  const t0 = Date.now();
+  try {
+    console.log(`[story] ${label}: start`);
+    await runStoryJob({ convex, secret: SECRET, serveUrl, job });
+    console.log(`[story] ${label}: done in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+  } catch (e) {
+    console.error(`[story] ${label} failed:`, e);
+    reportError(convex, { feature: `story.${job.kind}`, error: e, userId: job.userId });
+    await convex
+      .mutation(api.storyWorker.failJob, { secret: SECRET, jobId: job.jobId, error: e instanceof Error ? e.message : String(e) })
+      .catch(() => {});
+  } finally {
+    heldStory.delete(job.jobId);
+  }
+  return true;
+}
+
+async function storyLane(kinds = STORY_AI_KINDS) {
+  while (!stopping) {
+    let worked = false;
+    try {
+      worked = await processStoryJob(kinds);
+    } catch (e) {
+      console.error("[worker] story poll error:", e);
+    }
+    if (!worked) await new Promise((r) => setTimeout(r, 3000));
+  }
+}
+storyLane();
+storyLane();
+// AI video clips (Phase 2) mostly wait on Higgsfield, so they get their own
+// lanes and never hold up scripts, pictures or voices.
+storyLane(["video"]);
+storyLane(["video"]);
+storyLane(["video"]);
 
 // Poll loop: clip sources first (users wait on them), then smart edits,
 // clip exports, then B-roll renders.
@@ -284,6 +339,11 @@ while (true) {
     await processClipRenders();
   } catch (e) {
     console.error("[worker] clip render poll error:", e);
+  }
+  try {
+    await processStoryJob(["render"]);
+  } catch (e) {
+    console.error("[worker] story render poll error:", e);
   }
   try {
     const queued = await convex.query(api.broll.listQueued, { secret: SECRET });

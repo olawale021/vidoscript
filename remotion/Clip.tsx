@@ -44,7 +44,7 @@ export const clipDurationInFrames = (p: Pick<ClipCompositionProps, "start" | "en
   Math.max(1, Math.ceil(clipTimeline(p).duration * CLIP_FPS));
 
 // Words mapped to output time (cut words are dropped).
-type OutWord = ClipWord & { hl?: SmartHighlight };
+export type OutWord = ClipWord & { hl?: SmartHighlight };
 
 function outputWords(words: ClipWord[], tl: Timeline, highlights: SmartHighlight[]): OutWord[] {
   const out: OutWord[] = [];
@@ -86,7 +86,7 @@ const STYLE: Record<Exclude<CaptionStyle, "none">, { font: string; weight: numbe
   clean: { font: FONTS.nunito, weight: 800, upper: false, maxWords: 6 },
 };
 
-const Captions: React.FC<{
+export const Captions: React.FC<{
   words: OutWord[];
   style: Exclude<CaptionStyle, "none">;
   position: ClipCompositionProps["captionPosition"];
@@ -303,7 +303,7 @@ const VideoLayer: React.FC<{
 
 // ── Overlays ──
 
-const Hook: React.FC<{ text: string; durationSec: number }> = ({ text, durationSec }) => {
+export const Hook: React.FC<{ text: string; durationSec: number }> = ({ text, durationSec }) => {
   const frame = useCurrentFrame();
   const { fps, width, height } = useVideoConfig();
   const enter = spring({ frame, fps, config: { damping: 14, stiffness: 140 } });

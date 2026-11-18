@@ -76,11 +76,11 @@ Rules:
 Return ONLY a JSON array, best first. Each item:
 {"start": number, "end": number, "title": "short title, max 8 words", "hook": "the opening line or a rewritten scroll-stopping hook", "reason": "one sentence on why it works", "score": integer 0-100 (how likely it performs)}`;
 
-// How many clips to aim for: one per ~6 minutes, 3..10 (a 1-hour video → 10).
+// How many clips to aim for: one per ~6 minutes, 3..20 (1 hour → 10, 2 hours → 20).
 export function targetClipCount(durationSec) {
   const d = durationSec ?? 0;
   if (d < 180) return d < 90 ? 1 : 2; // very short videos: 1–2 clips
-  return Math.max(3, Math.min(10, Math.round(d / 360)));
+  return Math.max(3, Math.min(20, Math.round(d / 360)));
 }
 
 // Sentence-ish transcript lines from words (used when re-finding from a saved
@@ -105,7 +105,7 @@ export function segmentsFromWords(words) {
 function preferenceBlock(prefs) {
   if (!prefs || (!prefs.liked.length && !prefs.disliked.length)) return "";
   const fmt = (c) =>
-    `- "${c.title}" (${c.seconds}s)${c.reasons.length ? ` [${c.reasons.join(", ")}]` : ""}: ${c.text}`;
+    `- "${c.title}" (${c.seconds}s)${c.reasons.length ? ` [${c.reasons.join(", ")}]` : ""}${c.note ? ` (their words: "${c.note}")` : ""}: ${c.text}`;
   return `\n\nThis creator has rated clips from their earlier videos. Learn WHAT KIND of moment they like — hook strength, energy, humour, pacing, length, story shape, how self-contained it is — and pick moments of that kind from THIS video's own content. Don't look for the same topics or names as the examples (they may be from different videos), and avoid the kinds of moment they DISLIKED, respecting the reasons given:
 ${prefs.liked.length ? `LIKED:\n${prefs.liked.map(fmt).join("\n")}` : ""}
 ${prefs.disliked.length ? `DISLIKED:\n${prefs.disliked.map(fmt).join("\n")}` : ""}`;
@@ -152,35 +152,36 @@ function snapClips(raw, words, duration, existing = [], limit = 10) {
   return kept.slice(0, limit);
 }
 
-async function findClips({ segments, words, duration, title, convex, userId, count, existing = [] }) {
-  const key = process.env.GEMINI_API_KEY;
-  if (!key) throw new Error("GEMINI_API_KEY is not set for the worker");
-  const model = new GoogleGenerativeAI(key).getGenerativeModel({
-    model: GEMINI_MODEL,
-    generationConfig: { responseMimeType: "application/json" },
-  });
-  const transcript = segments.map((s) => `[${s.start.toFixed(1)}-${s.end.toFixed(1)}] ${s.text.trim()}`).join("\n");
-  const prefs = await convex.query(api.clips.preferencesFor, { secret: process.env.BROLL_WORKER_SECRET, userId }).catch(() => null);
-  // Ask for a few spares: overlaps and bad timestamps get filtered out below.
-  const ask = count + 3;
-  const already = existing.length
-    ? `\n\nAlready chosen (do NOT pick these again or overlap them):\n${existing.map((c) => `- [${c.start.toFixed(1)}-${c.end.toFixed(1)}] ${c.title}`).join("\n")}`
-    : "";
-  if (prefs && (prefs.liked.length || prefs.disliked.length)) {
-    console.log(`[clips] using preferences: ${prefs.liked.length} liked, ${prefs.disliked.length} disliked`);
-  }
-  const result = await withAiRetry(() => model.generateContent({
-    contents: [
-      {
-        role: "user",
-        parts: [
-          {
-            text: `${FINDER_PROMPT}\n- Return exactly ${ask} clips, best first.${preferenceBlock(prefs)}${already}\n\nVideo title: ${title}\nVideo length: ${Math.round(duration ?? 0)} seconds\n\nTranscript:\n${transcript}`,
-          },
-        ],
-      },
-    ],
-  }));
+// Long videos are searched in ~30-minute sections so moments late in the video
+// get the same attention as the start; candidates are then ranked together.
+const WINDOW_SECONDS = 30 * 60;
+const WINDOW_FROM = 45 * 60;
+
+function rejectedBlock(rejected) {
+  if (!rejected?.length) return "";
+  return `\n\nThe creator REJECTED these clips from this video. Do not pick them, and avoid moments with the same problems:\n${rejected
+    .map(
+      (c) =>
+        `- [${c.start.toFixed(1)}-${c.end.toFixed(1)}] ${c.title}${c.reasons.length ? ` — ${c.reasons.join(", ")}` : ""}${c.note ? ` — "${c.note}"` : ""}`
+    )
+    .join("\n")}`;
+}
+
+async function askFinder({ model, convex, userId, transcript, ask, extra, title, duration, section }) {
+  const result = await withAiRetry(() =>
+    model.generateContent({
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              text: `${FINDER_PROMPT}\n- Return exactly ${ask} clips, best first.${extra}\n\nVideo title: ${title}\nVideo length: ${Math.round(duration ?? 0)} seconds${section ? `\nThis is ${section} of the video; timestamps are from the start of the whole video.` : ""}\n\nTranscript:\n${transcript}`,
+            },
+          ],
+        },
+      ],
+    })
+  );
   const u = result.response.usageMetadata ?? {};
   const inputTokens = u.promptTokenCount ?? 0;
   const outputTokens = (u.candidatesTokenCount ?? 0) + (u.thoughtsTokenCount ?? 0);
@@ -193,7 +194,6 @@ async function findClips({ segments, words, duration, title, convex, userId, cou
     outputTokens,
     costUsd: (inputTokens * p.input + outputTokens * p.output) / 1_000_000,
   });
-
   let raw;
   try {
     raw = JSON.parse(result.response.text());
@@ -201,6 +201,67 @@ async function findClips({ segments, words, duration, title, convex, userId, cou
     throw new Error("The AI returned clips in an unreadable format");
   }
   if (raw && !Array.isArray(raw) && Array.isArray(raw.clips)) raw = raw.clips;
+  return Array.isArray(raw) ? raw : [];
+}
+
+function hintsBlock(hints) {
+  if (!hints?.length) return "";
+  const fmt = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+  return `\n\nViewers point to these moments (timestamped comments / most replayed). Check them first and prefer them when they make strong standalone clips; don't force them if they don't:\n${hints
+    .map((h) => `- around ${fmt(h.start)}${h.label ? ` — "${h.label}"` : ""}`)
+    .join("\n")}`;
+}
+
+async function findClips({ segments, words, duration, title, convex, userId, count, existing = [], rejected = [], hints = [] }) {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) throw new Error("GEMINI_API_KEY is not set for the worker");
+  const model = new GoogleGenerativeAI(key).getGenerativeModel({
+    model: GEMINI_MODEL,
+    generationConfig: { responseMimeType: "application/json" },
+  });
+  const prefs = await convex.query(api.clips.preferencesFor, { secret: process.env.BROLL_WORKER_SECRET, userId }).catch(() => null);
+  if (prefs && (prefs.liked.length || prefs.disliked.length)) {
+    console.log(`[clips] using preferences: ${prefs.liked.length} liked, ${prefs.disliked.length} disliked`);
+  }
+  const lines = (list) => list.map((s) => `[${s.start.toFixed(1)}-${s.end.toFixed(1)}] ${s.text.trim()}`).join("\n");
+  const already = (list) =>
+    list.length
+      ? `\n\nAlready chosen (do NOT pick these again or overlap them):\n${list.map((c) => `- [${c.start.toFixed(1)}-${c.end.toFixed(1)}] ${c.title}`).join("\n")}`
+      : "";
+  const base = `${preferenceBlock(prefs)}${rejectedBlock(rejected)}${hintsBlock(hints)}`;
+  if (hints.length) console.log(`[clips] using ${hints.length} scout hints`);
+  const total = duration ?? segments[segments.length - 1]?.end ?? 0;
+
+  let raw = [];
+  if (total <= WINDOW_FROM) {
+    // Ask for a few spares: overlaps and bad timestamps get filtered out below.
+    raw = await askFinder({ model, convex, userId, transcript: lines(segments), ask: count + 3, extra: base + already(existing), title, duration });
+  } else {
+    const n = Math.ceil(total / WINDOW_SECONDS);
+    const windows = Array.from({ length: n }, (_, i) => [i * WINDOW_SECONDS, Math.min(total, (i + 1) * WINDOW_SECONDS)]);
+    console.log(`[clips] long video (${Math.round(total / 60)} min): searching ${n} sections`);
+    const results = await Promise.all(
+      windows.map(async ([from, to]) => {
+        const seg = segments.filter((s) => s.start >= from && s.start < to);
+        if (!seg.length) return [];
+        const ask = Math.max(2, Math.ceil((count * (to - from)) / total)) + 1;
+        const inWindow = existing.filter((c) => c.end > from && c.start < to);
+        const fmt = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+        return askFinder({
+          model,
+          convex,
+          userId,
+          transcript: lines(seg),
+          ask,
+          extra: base + already(inWindow),
+          title,
+          duration,
+          section: `the part from ${fmt(from)} to ${fmt(to)}`,
+        });
+      })
+    );
+    raw = results.flat();
+  }
   return snapClips(raw, words, duration, existing, count);
 }
 
@@ -223,19 +284,32 @@ export async function processClipSource({ convex, secret, job }) {
       const t = await convex.query(api.clips.transcriptFor, { secret, sourceId: job.id });
       if (!t.words.length) throw new Error("No saved transcript to find more clips from");
       await setStep("finding", 85);
-      const more = await findClips({
-        segments: segmentsFromWords(t.words),
-        words: t.words,
-        duration: t.durationSec,
-        title: job.title,
-        convex,
-        userId: job.userId,
-        count: 5,
-        existing: t.existing,
+      // Replacements first (they fill the rejected clips' slots), then "find more".
+      const wanted = t.replaceIds.length + t.more;
+      const more = wanted
+        ? await findClips({
+            segments: segmentsFromWords(t.words),
+            words: t.words,
+            duration: t.durationSec,
+            title: job.title,
+            convex,
+            userId: job.userId,
+            count: wanted,
+            existing: t.existing,
+            rejected: t.rejected,
+            hints: job.hints ?? [],
+          })
+        : [];
+      if (more.length === 0 && t.replaceIds.length === 0) throw new Error("No more good clips found in this video");
+      await convex.mutation(api.clips.saveClips, {
+        secret,
+        sourceId: job.id,
+        clips: more,
+        append: true,
+        replaced: t.replaceIds,
+        moreDone: t.more,
       });
-      if (more.length === 0) throw new Error("No more good clips found in this video");
-      await convex.mutation(api.clips.saveClips, { secret, sourceId: job.id, clips: more, append: true });
-      console.log(`[clips] ${job.id}: found ${more.length} more clips`);
+      console.log(`[clips] ${job.id}: ${t.replaceIds.length} replaced, ${Math.max(0, more.length - t.replaceIds.length)} more`);
       return;
     }
 
@@ -247,11 +321,12 @@ export async function processClipSource({ convex, secret, job }) {
     const stderr = await runFfmpeg(
       ["-i", job.videoUrl, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "32k", "-f", "mp3", audioPath],
       (t) => {
-        if (!duration) return;
-        const pct = Math.floor((t / duration) * 10);
+        const d = duration ?? job.durationSec;
+        if (!d) return;
+        const pct = Math.min(10, Math.floor((t / d) * 10));
         if (pct !== lastPct) {
           lastPct = pct;
-          setStep("extracting", 5 + pct * 1.5);
+          setStep("extracting", 20 + pct * 0.5, { detail: `${Math.round(t / 60)} of ${Math.round(d / 60)} min` });
         }
       }
     ).catch(async (e) => {
@@ -259,7 +334,7 @@ export async function processClipSource({ convex, secret, job }) {
     });
     duration = parseDuration(stderr);
     if ((await stat(audioPath)).size < 1000) throw new Error("The video has no audio track");
-    await setStep("transcribing", 20, duration ? { durationSec: round(duration) } : {});
+    await setStep("transcribing", 25, duration ? { durationSec: round(duration) } : {});
 
     // 2. Transcribe in chunks.
     const total = duration ?? CHUNK_SECONDS;
@@ -272,6 +347,7 @@ export async function processClipSource({ convex, secret, job }) {
       await runFfmpeg(["-ss", String(offset), "-t", String(CHUNK_SECONDS), "-i", audioPath, "-c", "copy", chunkPath]);
       const file = await toFile(await readFile(chunkPath), `chunk-${i}.mp3`, { type: "audio/mpeg" });
       console.log(`[clips] ${job.id}: transcribing chunk ${i + 1}/${chunks}`);
+      if (chunks > 1) await setStep("transcribing", 25 + (i / chunks) * 50, { detail: `Part ${i + 1} of ${chunks}` });
       // Groq whisper-large-v3-turbo first (~9x cheaper), OpenAI whisper-1 as fallback.
       let res;
       let via = "groq";
@@ -318,7 +394,7 @@ export async function processClipSource({ convex, secret, job }) {
         segments.push({ start: s.start + offset, end: s.end + offset, text: s.text });
       }
       await convex.mutation(api.clips.saveTranscriptChunk, { secret, sourceId: job.id, chunk: i, words: chunkWords });
-      await setStep("transcribing", 20 + ((i + 1) / chunks) * 55);
+      await setStep("transcribing", 25 + ((i + 1) / chunks) * 50);
     }
     if (words.length === 0) throw new Error("No speech was found in this video");
 
@@ -333,6 +409,7 @@ export async function processClipSource({ convex, secret, job }) {
       convex,
       userId: job.userId,
       count: targetClipCount(duration),
+      hints: job.hints ?? [],
     });
     if (clips.length === 0) throw new Error("The AI didn't find any usable clips in this video");
     await convex.mutation(api.clips.saveClips, { secret, sourceId: job.id, clips });

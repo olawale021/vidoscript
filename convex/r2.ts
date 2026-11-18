@@ -1,4 +1,4 @@
-import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { CopyObjectCommand, GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { R2 } from "@convex-dev/r2";
 import { components } from "./_generated/api";
@@ -85,5 +85,12 @@ export async function downloadUrl(key: string, fileName: string, expiresIn = SIX
       ResponseContentType: "video/mp4",
     }),
     { expiresIn }
+  );
+}
+
+// Server-side copy inside the bucket (no download), e.g. story → series refs.
+export async function copyObject(fromKey: string, toKey: string) {
+  await s3Client().send(
+    new CopyObjectCommand({ Bucket: process.env.R2_BUCKET, CopySource: `${process.env.R2_BUCKET}/${encodeURI(fromKey)}`, Key: toKey })
   );
 }

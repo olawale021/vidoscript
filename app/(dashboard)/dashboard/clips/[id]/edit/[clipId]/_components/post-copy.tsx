@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useMutation } from "convex/react";
-import { Check, Copy, Hash, Loader2, Wand2 } from "lucide-react";
+import { Check, Copy, Loader2, Wand2 } from "lucide-react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Button } from "@/components/ui/button";
@@ -65,26 +65,29 @@ export function PostCopy({
   const full = [caption.trim(), tags.join(" ")].filter(Boolean).join("\n\n");
 
   return (
-    <section className="space-y-2">
-      <div className="flex items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold text-neutral-300 inline-flex items-center gap-1.5">
-          <Hash size={15} className="text-sky-400" /> Post caption
-        </h2>
-        <Button size="sm" variant={caption ? "outline" : "default"} onClick={generate} disabled={busy}>
+    <section>
+      <div className="flex items-center justify-between gap-2 border-b border-line px-4 py-3.5">
+        <h3 className="text-sm font-semibold">Post copy</h3>
+        <Button size="sm" variant={caption ? "ghost" : "default"} onClick={generate} disabled={busy}>
           {busy ? <Loader2 size={14} className="mr-1 animate-spin" /> : <Wand2 size={14} className="mr-1" />}
-          {caption ? "Regenerate" : "Generate caption"}
+          {caption ? "Rewrite" : "Generate caption"}
         </Button>
       </div>
 
       {caption || tags.length ? (
         <>
+          <div className="grid gap-2 border-b border-line px-4 py-3">
+          <span className="text-xs text-faint">Caption</span>
           <textarea
             value={caption}
             onChange={(e) => setCaption(e.target.value)}
             onBlur={() => persist(caption, tags)}
-            rows={4}
-            className="w-full rounded-lg border border-neutral-800 bg-neutral-950 p-3 text-sm text-neutral-200 outline-none focus:border-neutral-600"
+            rows={5}
+            className="min-h-[60px] w-full resize-y rounded-[10px] border border-line-strong bg-bg px-3 py-2.5 text-base text-fg outline-none focus:border-neutral-600 sm:text-sm"
           />
+          </div>
+          <div className="grid gap-2 border-b border-line px-4 py-3">
+          <span className="text-xs text-faint">Hashtags</span>
           <div className="flex flex-wrap gap-1.5">
             {Array.from({ length: 5 }).map((_, i) => (
               <input
@@ -101,13 +104,14 @@ export function PostCopy({
                   setTags(next);
                   persist(caption, next);
                 }}
-                className="w-[calc(50%-0.2rem)] sm:w-auto sm:min-w-[7rem] rounded-full border border-neutral-700 bg-neutral-900 px-3 py-1 text-xs text-sky-300 outline-none focus:border-sky-400"
+                className="h-8 w-[calc(50%-0.2rem)] rounded-full border border-line-strong bg-transparent px-3 text-base text-muted outline-none focus:border-fg focus:text-fg sm:w-[7.5rem] sm:text-xs"
               />
             ))}
           </div>
           <Button
             size="sm"
             variant="outline"
+            className="justify-self-start"
             onClick={async () => {
               await navigator.clipboard.writeText(full);
               setCopied(true);
@@ -115,15 +119,16 @@ export function PostCopy({
             }}
           >
             {copied ? <Check size={14} className="mr-1" /> : <Copy size={14} className="mr-1" />}
-            {copied ? "Copied" : "Copy caption + hashtags"}
+            {copied ? "Copied" : "Copy caption and tags"}
           </Button>
+          </div>
         </>
       ) : (
-        <p className="text-xs text-neutral-500">
+        <p className="px-4 py-3 text-xs text-faint">
           Writes a hook-first caption and exactly 5 hashtags from what&apos;s said in this clip.
         </p>
       )}
-      {error && <p className="text-xs text-red-300">{error}</p>}
+      {error && <p className="px-4 py-2 text-xs text-bad">{error}</p>}
     </section>
   );
 }

@@ -1,14 +1,60 @@
 @import "tailwindcss";
 
+/* Design tokens from the VidoScript redesign (dark only). The neutral scale,
+   black and white are remapped so every existing page picks up the new
+   palette; new UI uses the named tokens (bg-surface, border-line, text-faint,
+   text-accent…). */
+@theme {
+  --color-bg: #050506;
+  --color-surface: #0f0f11;
+  --color-surface-2: #17171a;
+  --color-surface-3: #202024;
+  --color-line: #222226;
+  --color-line-strong: #34343a;
+  --color-fg: #f6f6f4;
+  --color-muted: #a3a3a8;
+  --color-faint: #6c6c72;
+  --color-accent: #f2b84b;
+  --color-accent-soft: rgba(242, 184, 75, 0.12);
+  --color-ok: #5fd39a;
+  --color-bad: #f2727a;
+
+  --color-black: #050506;
+  --color-white: #f6f6f4;
+  --color-neutral-50: #f6f6f4;
+  --color-neutral-100: #ececea;
+  --color-neutral-200: #dcdcd8;
+  --color-neutral-300: #c4c4c8;
+  --color-neutral-400: #a3a3a8;
+  --color-neutral-500: #6c6c72;
+  --color-neutral-600: #4a4a52;
+  --color-neutral-700: #34343a;
+  --color-neutral-800: #222226;
+  --color-neutral-900: #17171a;
+  --color-neutral-950: #0f0f11;
+
+  --font-sans: "Figtree", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --radius-card: 12px;
+  --radius-card-lg: 18px;
+}
+
 :root {
-  --background: #000000;
-  --foreground: #ffffff;
+  --background: #050506;
+  --foreground: #f6f6f4;
+  color-scheme: dark;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: "Figtree", sans-serif;
+  font-family: var(--font-sans);
   font-optical-sizing: auto;
   font-weight: 500;
   font-style: normal;
@@ -25,7 +71,7 @@ body {
   100% { background-position: -200% 0; }
 }
 .shimmer {
-  background: linear-gradient(90deg, #737373 40%, #fafafa 50%, #737373 60%);
+  background: linear-gradient(90deg, #8a8a90 40%, #fafafa 50%, #8a8a90 60%);
   background-size: 200% 100%;
   -webkit-background-clip: text;
   background-clip: text;
@@ -36,7 +82,7 @@ body {
 /* Slim dark scrollbars — the default white ones look off on a black UI */
 * {
   scrollbar-width: thin;               /* Firefox */
-  scrollbar-color: #262626 transparent;
+  scrollbar-color: #222226 transparent;
 }
 ::-webkit-scrollbar {
   width: 6px;
@@ -46,12 +92,24 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #262626;
+  background: #222226;
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #404040;
+  background: #34343a;
 }
 ::-webkit-scrollbar-corner {
   background: transparent;
+}
+
+/* Numbers that line up (timecodes, prices, counts). */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
 }

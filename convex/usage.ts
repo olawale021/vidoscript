@@ -107,3 +107,26 @@ export const dashboard = query({
     };
   },
 });
+
+// Sidebar usage card: the signed-in user's own usage this calendar month.
+export const myMonth = query({
+  args: {},
+  handler: async (ctx) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) return null;
+    const now = new Date();
+    const start = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
+    const rows = await ctx.db
+      .query("aiUsage")
+      .withIndex("by_user_created", (q) => q.eq("userId", identity.subject).gte("createdAt", start))
+      .collect();
+    let audioSeconds = 0;
+    let costUsd = 0;
+    for (const r of rows) {
+      // Count transcription audio only (TTS also records audioSeconds).
+      if (r.provider === "groq" || r.model === "whisper-1") audioSeconds += r.audioSeconds ?? 0;
+      costUsd += r.costUsd;
+    }
+    return { minutes: Math.round(audioSeconds / 60), costUsd: Math.round(costUsd * 100) / 100, calls: rows.length };
+  },
+});

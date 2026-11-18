@@ -2,15 +2,16 @@
 
 import { use, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { Player } from "@remotion/player";
+import { Player, type PlayerRef } from "@remotion/player";
 import { useMutation, useQuery } from "convex/react";
-import { ArrowLeft, Download, Loader2, RotateCcw, Scissors } from "lucide-react";
+import { ArrowLeft, Captions, Crop, Loader2, RotateCcw, Scissors, Send, Wand2 } from "lucide-react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Button } from "@/components/ui/button";
 import { SaveVideoButton } from "@/components/save-video-button";
 import { cn } from "@/lib/utils";
-import { ClipComposition, clipDurationInFrames } from "@/remotion/Clip";
+import { ClipComposition, clipDurationInFrames, clipTimeline } from "@/remotion/Clip";
+import { Segmented } from "@/components/ui/kit";
 import {
   CLIP_DEFAULTS,
   CLIP_DIMS,
@@ -23,7 +24,8 @@ import {
   type Framing,
   type SmartEdit,
 } from "@/types/clip";
-import { SmartPanel, SmartTimeline } from "./_components/smart-panel";
+import { SmartPanel } from "./_components/smart-panel";
+import { EditorTimeline } from "./_components/timeline";
 import { PostCopy } from "./_components/post-copy";
 
 const fmt = (s: number) => {
@@ -45,25 +47,29 @@ const STYLES: { key: CaptionStyle; label: string }[] = [
 ];
 const POSITIONS: CaptionPosition[] = ["top", "middle", "bottom"];
 
-function Segmented<T extends string>({ value, options, onChange }: {
-  value: T;
-  options: { key: T; label: string }[];
-  onChange: (v: T) => void;
-}) {
+type PanelKey = "smart" | "captions" | "format" | "post";
+const PANELS: { key: PanelKey; label: string; icon: typeof Wand2 }[] = [
+  { key: "smart", label: "Smart", icon: Wand2 },
+  { key: "captions", label: "Captions", icon: Captions },
+  { key: "format", label: "Format", icon: Crop },
+  { key: "post", label: "Post", icon: Send },
+];
+
+// One inspector option block (".opt" in the design).
+function Opt({ label, children }: { label?: string; children: React.ReactNode }) {
   return (
-    <div className="flex flex-wrap gap-1 rounded-lg border border-neutral-800 p-1 bg-neutral-950">
-      {options.map((o) => (
-        <button
-          key={o.key}
-          onClick={() => onChange(o.key)}
-          className={cn(
-            "px-2.5 py-1 rounded-md text-xs font-medium transition",
-            value === o.key ? "bg-neutral-800 text-white" : "text-neutral-400 hover:text-white"
-          )}
-        >
-          {o.label}
-        </button>
-      ))}
+    <div className="grid gap-2 border-b border-line px-4 py-3">
+      {label && <span className="text-xs text-faint">{label}</span>}
+      {children}
+    </div>
+  );
+}
+
+function InspHead({ title, children }: { title: string; children?: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-2 border-b border-line px-4 py-3.5">
+      <h3 className="text-sm font-semibold">{title}</h3>
+      {children}
     </div>
   );
 }
@@ -184,11 +190,18 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
     };
   }, [data, s, wordsInClip, smart]);
 
-  if (data === undefined || (data && !s)) return <Loader2 className="animate-spin text-neutral-500" />;
-  if (data === null || !s || !inputProps) {
+  const playerRef = useRef<PlayerRef>(null);
+  const [panel, setPanel] = useState<PanelKey>("smart");
+  const timeline = useMemo(() => (inputProps ? clipTimeline(inputProps) : null), [inputProps]);
+
+  if (data === undefined || (data && !s)) return <Loader2 className="animate-spin text-faint" />;
+  if (data === null || !s || !inputProps || !timeline) {
     return (
-      <div className="text-neutral-400">
-        Clip not found. <Link href={`/dashboard/clips/${id}`} className="underline">Back</Link>
+      <div className="text-muted">
+        Clip not found.{" "}
+        <Link href={`/dashboard/clips/${id}`} className="underline">
+          Back
+        </Link>
       </div>
     );
   }
@@ -198,31 +211,41 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
   const { window: win } = data;
   const clip = data.clip;
   const rendering = clip.renderStatus === "queued" || clip.renderStatus === "rendering";
-  const pct = (t: number) => ((t - win.start) / Math.max(1, win.end - win.start)) * 100;
+  const nudge = (label: string, fn: () => void) => (
+    <Button key={label} size="sm" variant="outline" onClick={fn}>
+      {label}
+    </Button>
+  );
 
   return (
-    <div className="max-w-6xl mx-auto space-y-5">
-      <div className="flex items-start justify-between gap-4 flex-wrap">
-        <div className="min-w-0">
-          <Link href={`/dashboard/clips/${id}`} className="text-sm text-neutral-500 hover:text-white inline-flex items-center gap-1">
-            <ArrowLeft size={14} /> {data.source.title}
-          </Link>
-          <input
-            value={s.title}
-            onChange={(e) => setS({ ...s, title: e.target.value })}
-            className="block mt-2 bg-transparent text-xl font-semibold text-white outline-none border-b border-transparent focus:border-neutral-700 w-full max-w-xl"
-          />
-          <div className="text-xs text-neutral-500 mt-1">
-            {fmt(s.start)} – {fmt(s.end)} · {len.toFixed(1)}s
-            {smart ? ` → ${(clipDurationInFrames(inputProps) / CLIP_FPS).toFixed(1)}s after smart cuts` : ""}{" "}
-            {saving ? "· saving…" : "· saved"}
+    <div className="mx-auto max-w-6xl space-y-4 max-sm:pb-16">
+      <div className="space-y-2">
+        <Link href={`/dashboard/clips/${id}`} className="inline-flex max-w-full items-center gap-1.5 text-[13px] text-faint hover:text-fg">
+          <ArrowLeft size={14} className="flex-shrink-0" /> <span className="truncate">{data.source.title}</span>
+        </Link>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="min-w-[200px] flex-1">
+            <input
+              value={s.title}
+              onChange={(e) => setS({ ...s, title: e.target.value })}
+              aria-label="Clip title"
+              className="w-full border-b border-dashed border-transparent bg-transparent text-xl font-semibold tracking-tight text-fg outline-none focus:border-line-strong"
+            />
+            <div className="mt-0.5 font-mono text-xs text-faint tabular">
+              {fmt(s.start)} – {fmt(s.end)} · {len.toFixed(1)}s
+              {smart ? ` → ${(clipDurationInFrames(inputProps) / CLIP_FPS).toFixed(1)}s after smart cuts` : ""} ·{" "}
+              {saving ? <span className="text-accent">saving…</span> : <span className="text-ok">saved</span>}
+            </div>
           </div>
-        </div>
-        <div className="flex items-center gap-2">
           {clip.renderStatus === "done" && data.downloadUrl && !rendering && (
             <SaveVideoButton downloadUrl={data.downloadUrl} fileName={`${s.title || "clip"}.mp4`} />
           )}
-          <Button size="sm" disabled={rendering || saving} onClick={() => exportClip({ clipId })}>
+          <Button
+            size="sm"
+            disabled={rendering || saving}
+            onClick={() => exportClip({ clipId })}
+            className="max-sm:fixed max-sm:bottom-[calc(70px+env(safe-area-inset-bottom))] max-sm:left-4 max-sm:right-4 max-sm:z-30 max-sm:h-[46px] max-sm:text-[15px] max-sm:shadow-[0_10px_30px_rgba(0,0,0,.6)]"
+          >
             {rendering ? (
               <>
                 <Loader2 size={14} className="mr-1 animate-spin" />
@@ -237,207 +260,298 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
         </div>
       </div>
 
-      {error && <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm text-red-200">{error}</div>}
+      {error && <div className="rounded-[10px] border border-bad/40 bg-bad/10 px-4 py-2 text-sm text-bad">{error}</div>}
       {clip.renderStatus === "failed" && (
-        <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm text-red-200">
+        <div className="rounded-[10px] border border-bad/40 bg-bad/10 px-4 py-2 text-sm text-bad">
           Export failed: {clip.renderError ?? "unknown error"}
         </div>
       )}
-      {clip.renderStatus === "done" && !rendering && (() => {
-        const outAspect = clip.renderedAspect;
-        const outFraming = clip.renderedFraming;
-        const mismatch =
-          (outAspect && outAspect !== s.aspect) || (outFraming && s.aspect !== "16:9" && outFraming !== s.framing);
-        return mismatch ? (
-          <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-sm text-amber-200">
-            Your downloaded MP4 is <b>{outAspect}</b>
-            {outFraming && outAspect !== "16:9" ? ` (${outFraming === "fit" ? "full video" : "cropped"})` : ""}, but this
-            clip is now set to <b>{s.aspect}</b>
-            {s.aspect !== "16:9" ? ` (${s.framing === "fit" ? "full video" : "cropped"})` : ""}. Click <b>Re-export</b> to
-            update it — otherwise YouTube / TikTok will crop it.
-          </div>
-        ) : (
-          <div className="text-xs text-neutral-500">
-            MP4 ready{outAspect ? ` · ${outAspect}` : ""}. Change anything and click Re-export to update it.
-          </div>
-        );
-      })()}
-
-      <div className="grid lg:grid-cols-[minmax(0,1fr)_380px] gap-6 items-start">
-        <div className="flex justify-center rounded-lg border border-neutral-800 bg-neutral-950 p-4">
-          <div style={{ width: "100%", maxWidth: s.aspect === "9:16" ? 380 : s.aspect === "1:1" ? 520 : 760 }}>
-            <Player
-              component={ClipComposition}
-              inputProps={inputProps}
-              durationInFrames={clipDurationInFrames(inputProps)}
-              fps={CLIP_FPS}
-              compositionWidth={dims.width}
-              compositionHeight={dims.height}
-              controls
-              style={{ width: "100%", aspectRatio: `${dims.width} / ${dims.height}`, borderRadius: 8, overflow: "hidden" }}
-            />
-            <div className="mt-3">
-              <SmartTimeline smart={smart} start={s.start} end={s.end} />
+      {clip.renderStatus === "done" &&
+        !rendering &&
+        (() => {
+          const outAspect = clip.renderedAspect;
+          const outFraming = clip.renderedFraming;
+          const mismatch =
+            (outAspect && outAspect !== s.aspect) || (outFraming && s.aspect !== "16:9" && outFraming !== s.framing);
+          return mismatch ? (
+            <div className="rounded-[10px] border border-accent/35 bg-accent-soft px-4 py-2 text-sm text-accent">
+              Your downloaded MP4 is <b>{outAspect}</b>
+              {outFraming && outAspect !== "16:9" ? ` (${outFraming === "fit" ? "full video" : "cropped"})` : ""}, but this
+              clip is now set to <b>{s.aspect}</b>
+              {s.aspect !== "16:9" ? ` (${s.framing === "fit" ? "full video" : "cropped"})` : ""}. Click <b>Re-export</b> to
+              update it, otherwise YouTube / TikTok will crop it.
             </div>
-          </div>
+          ) : null;
+        })()}
+
+      <div className="grid overflow-hidden rounded-[18px] border border-line bg-surface sm:grid-cols-[56px_minmax(0,1fr)] xl:min-h-[620px] xl:grid-cols-[64px_minmax(0,1fr)_340px]">
+        {/* Rail: picks the inspector panel (a tab row on phones) */}
+        <div
+          role="tablist"
+          aria-label="Editor panels"
+          className="flex gap-1 overflow-x-auto border-b border-line p-2 sm:grid sm:content-start sm:border-b-0 sm:border-r sm:px-2 sm:py-2.5"
+        >
+          {PANELS.map(({ key, label, icon: Icon }) => (
+            <button
+              key={key}
+              type="button"
+              role="tab"
+              aria-selected={panel === key}
+              onClick={() => setPanel(key)}
+              className={cn(
+                "flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-[9px] px-2.5 py-1.5 text-xs transition sm:grid sm:flex-none sm:justify-items-center sm:gap-1 sm:px-0 sm:py-2 sm:text-[10px]",
+                panel === key ? "bg-surface-3 text-fg" : "text-faint hover:bg-surface-2 hover:text-fg"
+              )}
+            >
+              <Icon size={18} />
+              {label}
+            </button>
+          ))}
         </div>
 
-        <div className="space-y-5">
-          <PostCopy
-            clipId={clipId}
-            title={s.title}
-            hook={clip.hook}
-            transcript={captionText}
-            savedCaption={clip.postCaption}
-            savedHashtags={clip.hashtags}
-          />
-
-          <SmartPanel
-            clipId={clipId}
-            clipTitle={s.title}
-            words={data.words}
-            smart={smart}
-            status={clip.smartStatus}
-            error={clip.smartError}
+        {/* Canvas: preview + timeline */}
+        <div className="grid min-w-0 grid-rows-[1fr_auto] bg-bg">
+          <div className="grid place-items-center p-4 sm:p-6">
+            <div
+              style={{ width: "100%", maxWidth: s.aspect === "9:16" ? 300 : s.aspect === "1:1" ? 440 : 680 }}
+              className="max-sm:max-w-[260px]"
+            >
+              <Player
+                ref={playerRef}
+                component={ClipComposition}
+                inputProps={inputProps}
+                durationInFrames={clipDurationInFrames(inputProps)}
+                fps={CLIP_FPS}
+                compositionWidth={dims.width}
+                compositionHeight={dims.height}
+                controls
+                style={{
+                  width: "100%",
+                  aspectRatio: `${dims.width} / ${dims.height}`,
+                  borderRadius: 14,
+                  overflow: "hidden",
+                  boxShadow: "0 30px 60px -20px rgba(0,0,0,.9)",
+                }}
+              />
+            </div>
+          </div>
+          <EditorTimeline
+            playerRef={playerRef}
+            fps={CLIP_FPS}
+            timeline={timeline}
+            win={win}
             start={s.start}
             end={s.end}
-            aspect={s.aspect}
-            onChange={setSmart}
-            onRegenerate={() => regenerateSmart({ clipId })}
+            smart={smart}
+            words={wordsInClip}
+            onTrim={(start, end) => setS({ ...s, start, end })}
           />
+        </div>
 
-          <section className="space-y-2">
-            <h2 className="text-sm font-semibold text-neutral-300">Trim</h2>
-            <div className="relative h-8 rounded-md bg-neutral-900 border border-neutral-800">
-              <div
-                className="absolute top-0 bottom-0 bg-sky-400/25 border-x-2 border-sky-400"
-                style={{ left: `${pct(s.start)}%`, width: `${pct(s.end) - pct(s.start)}%` }}
-              />
-            </div>
-            <label className="block text-xs text-neutral-500">
-              Start {fmt(s.start)}
-              <input
-                type="range"
-                min={win.start}
-                max={win.end}
-                step={0.1}
-                value={s.start}
-                onChange={(e) => setS({ ...s, start: Math.min(Number(e.target.value), s.end - 3) })}
-                className="w-full accent-sky-400"
-              />
-            </label>
-            <label className="block text-xs text-neutral-500">
-              End {fmt(s.end)}
-              <input
-                type="range"
-                min={win.start}
-                max={win.end}
-                step={0.1}
-                value={s.end}
-                onChange={(e) => setS({ ...s, end: Math.max(Number(e.target.value), s.start + 3) })}
-                className="w-full accent-sky-400"
-              />
-            </label>
-            <div className="flex flex-wrap gap-1">
-              {[
-                ["Start −0.5s", () => setS({ ...s, start: Math.max(win.start, s.start - 0.5) })],
-                ["Start +0.5s", () => setS({ ...s, start: Math.min(s.end - 3, s.start + 0.5) })],
-                ["End −0.5s", () => setS({ ...s, end: Math.max(s.start + 3, s.end - 0.5) })],
-                ["End +0.5s", () => setS({ ...s, end: Math.min(win.end, s.end + 0.5) })],
-              ].map(([label, fn]) => (
-                <Button key={label as string} size="sm" variant="outline" onClick={fn as () => void}>
-                  {label as string}
-                </Button>
-              ))}
-            </div>
-          </section>
+        {/* Inspector */}
+        <aside className="min-w-0 border-t border-line sm:col-span-2 xl:col-span-1 xl:max-h-[760px] xl:overflow-y-auto xl:border-l xl:border-t-0">
+          {panel === "smart" && (
+            <SmartPanel
+              clipId={clipId}
+              clipTitle={s.title}
+              words={data.words}
+              smart={smart}
+              status={clip.smartStatus}
+              error={clip.smartError}
+              start={s.start}
+              end={s.end}
+              aspect={s.aspect}
+              onChange={setSmart}
+              onRegenerate={() => regenerateSmart({ clipId })}
+            />
+          )}
 
-          <section className="space-y-2">
-            <h2 className="text-sm font-semibold text-neutral-300">Format</h2>
-            <Segmented value={s.aspect} options={ASPECTS} onChange={(aspect) => setS({ ...s, aspect })} />
-            {s.aspect !== "16:9" && (
-              <>
+          {panel === "captions" && (
+            <>
+              <InspHead title="Captions" />
+              <Opt label="Style">
                 <Segmented
-                  value={s.framing}
-                  options={[
-                    { key: "fill" as Framing, label: "Fill (crop & follow face)" },
-                    { key: "fit" as Framing, label: "Fit (full video)" },
-                  ]}
-                  onChange={(framing) => setS({ ...s, framing })}
+                  label="Caption style"
+                  value={s.captionStyle}
+                  options={STYLES.map((o) => ({ value: o.key, label: o.key === "none" ? "Off" : o.label }))}
+                  onChange={(captionStyle) => setS({ ...s, captionStyle })}
                 />
-                {s.framing === "fit" && (
+              </Opt>
+              {s.captionStyle !== "none" && (
+                <Opt label="Position">
                   <Segmented
+                    label="Caption position"
+                    value={s.captionPosition}
+                    options={POSITIONS.map((p) => ({ value: p, label: p[0].toUpperCase() + p.slice(1) }))}
+                    onChange={(captionPosition) => setS({ ...s, captionPosition })}
+                  />
+                </Opt>
+              )}
+              <Opt label="Text">
+                <textarea
+                  value={captionDraft ?? captionText}
+                  onChange={(e) => setCaptionDraft(e.target.value)}
+                  rows={6}
+                  aria-label="Caption text"
+                  className="min-h-[60px] w-full resize-y rounded-[10px] border border-line-strong bg-bg px-3 py-2.5 text-base text-fg outline-none focus:border-neutral-600 sm:text-sm"
+                />
+                <p className="text-xs text-faint">
+                  Fix typos word for word to keep exact timing. Adding or removing words spreads them evenly over the clip.
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  <Button
+                    size="sm"
+                    disabled={captionDraft === null || captionDraft === captionText}
+                    onClick={async () => {
+                      await setCaptionText({ clipId, text: captionDraft ?? "" });
+                      setCaptionDraft(null);
+                    }}
+                  >
+                    Save text
+                  </Button>
+                  {clip.captionWords && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={async () => {
+                        await resetCaptions({ clipId });
+                        setCaptionDraft(null);
+                      }}
+                    >
+                      <RotateCcw size={14} className="mr-1" /> Reset to transcript
+                    </Button>
+                  )}
+                </div>
+              </Opt>
+            </>
+          )}
+
+          {panel === "format" && (
+            <>
+              <InspHead title="Format" />
+              <Opt label="Aspect">
+                <Segmented
+                  label="Aspect ratio"
+                  value={s.aspect}
+                  options={ASPECTS.map((o) => ({ value: o.key, label: o.key, title: o.label }))}
+                  onChange={(aspect) => setS({ ...s, aspect })}
+                />
+                <p className="text-xs text-faint">{ASPECTS.find((o) => o.key === s.aspect)?.label}</p>
+              </Opt>
+              {s.aspect !== "16:9" && (
+                <Opt label="Framing">
+                  <Segmented
+                    label="Framing"
+                    value={s.framing}
+                    options={[
+                      { value: "fit" as Framing, label: "Fit · full video" },
+                      { value: "fill" as Framing, label: "Fill · follow face" },
+                    ]}
+                    onChange={(framing) => setS({ ...s, framing })}
+                  />
+                  <p className="text-xs text-faint">
+                    {s.framing === "fit"
+                      ? "Fit keeps the whole frame, so YouTube Shorts won't crop it."
+                      : "Fill crops to the speaker and follows their face."}
+                  </p>
+                </Opt>
+              )}
+              {s.aspect !== "16:9" && s.framing === "fit" && (
+                <Opt label="Background">
+                  <Segmented
+                    label="Background"
                     value={s.fitBackground}
                     options={[
-                      { key: "blur" as FitBackground, label: "Blurred background" },
-                      { key: "black" as FitBackground, label: "Black bars" },
+                      { value: "blur" as FitBackground, label: "Blurred" },
+                      { value: "black" as FitBackground, label: "Black bars" },
                     ]}
                     onChange={(fitBackground) => setS({ ...s, fitBackground })}
                   />
-                )}
-              </>
-            )}
-            {s.aspect !== "16:9" && s.framing === "fill" && (
-              <label className="block text-xs text-neutral-500">
-                Frame position (left ↔ right)
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.01}
-                  value={s.cropX}
-                  onChange={(e) => setS({ ...s, cropX: Number(e.target.value) })}
-                  className="w-full accent-sky-400"
-                />
-              </label>
-            )}
-          </section>
-
-          <section className="space-y-2">
-            <h2 className="text-sm font-semibold text-neutral-300">Captions</h2>
-            <Segmented value={s.captionStyle} options={STYLES} onChange={(captionStyle) => setS({ ...s, captionStyle })} />
-            {s.captionStyle !== "none" && (
-              <Segmented
-                value={s.captionPosition}
-                options={POSITIONS.map((p) => ({ key: p, label: p[0].toUpperCase() + p.slice(1) }))}
-                onChange={(captionPosition) => setS({ ...s, captionPosition })}
-              />
-            )}
-            <textarea
-              value={captionDraft ?? captionText}
-              onChange={(e) => setCaptionDraft(e.target.value)}
-              rows={6}
-              className="w-full rounded-lg border border-neutral-800 bg-neutral-950 p-3 text-sm text-neutral-200 outline-none focus:border-neutral-600"
-            />
-            <div className="flex gap-2">
-              <Button
-                size="sm"
-                disabled={captionDraft === null || captionDraft === captionText}
-                onClick={async () => {
-                  await setCaptionText({ clipId, text: captionDraft ?? "" });
-                  setCaptionDraft(null);
-                }}
-              >
-                Save caption text
-              </Button>
-              {clip.captionWords && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={async () => {
-                    await resetCaptions({ clipId });
-                    setCaptionDraft(null);
-                  }}
-                >
-                  <RotateCcw size={14} className="mr-1" /> Reset to transcript
-                </Button>
+                </Opt>
               )}
-            </div>
-            <p className="text-xs text-neutral-500">
-              Fix typos word for word to keep exact timing. Adding or removing words spreads them evenly over the clip.
-            </p>
-          </section>
-        </div>
+              {s.aspect !== "16:9" && s.framing === "fill" && (
+                <Opt label="Frame position (left ↔ right)">
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={s.cropX}
+                    aria-label="Frame position"
+                    onChange={(e) => setS({ ...s, cropX: Number(e.target.value) })}
+                    className="h-8 w-full accent-[var(--color-fg)]"
+                  />
+                </Opt>
+              )}
+              <Opt label="Trim">
+                <div className="grid gap-1 font-mono text-xs text-muted">
+                  <label className="grid gap-1 rounded-md bg-surface-2 px-2 py-1.5">
+                    <span className="flex justify-between">
+                      <span>Start</span>
+                      <span className="tabular">{fmt(s.start)}</span>
+                    </span>
+                    <input
+                      type="range"
+                      min={win.start}
+                      max={win.end}
+                      step={0.1}
+                      value={s.start}
+                      onChange={(e) => setS({ ...s, start: Math.min(Number(e.target.value), s.end - 3) })}
+                      className="h-6 w-full accent-[var(--color-fg)]"
+                    />
+                  </label>
+                  <label className="grid gap-1 rounded-md bg-surface-2 px-2 py-1.5">
+                    <span className="flex justify-between">
+                      <span>End</span>
+                      <span className="tabular">{fmt(s.end)}</span>
+                    </span>
+                    <input
+                      type="range"
+                      min={win.start}
+                      max={win.end}
+                      step={0.1}
+                      value={s.end}
+                      onChange={(e) => setS({ ...s, end: Math.max(Number(e.target.value), s.start + 3) })}
+                      className="h-6 w-full accent-[var(--color-fg)]"
+                    />
+                  </label>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {nudge("Start −0.5s", () => setS({ ...s, start: Math.max(win.start, s.start - 0.5) }))}
+                  {nudge("Start +0.5s", () => setS({ ...s, start: Math.min(s.end - 3, s.start + 0.5) }))}
+                  {nudge("End −0.5s", () => setS({ ...s, end: Math.max(s.start + 3, s.end - 0.5) }))}
+                  {nudge("End +0.5s", () => setS({ ...s, end: Math.min(win.end, s.end + 0.5) }))}
+                </div>
+              </Opt>
+            </>
+          )}
+
+          {/* Kept mounted so an unsaved caption/hashtag edit survives switching panels. */}
+          <div hidden={panel !== "post"}>
+            <PostCopy
+              clipId={clipId}
+              title={s.title}
+              hook={clip.hook}
+              transcript={captionText}
+              savedCaption={clip.postCaption}
+              savedHashtags={clip.hashtags}
+            />
+          </div>
+
+          <div className="flex items-center gap-2.5 px-4 py-3 text-xs text-faint">
+            {rendering ? (
+              <span className="text-accent">
+                {clip.renderStatus === "queued" ? "Export queued…" : `Rendering ${clip.renderProgress ?? 0}%`}
+              </span>
+            ) : clip.renderStatus === "done" ? (
+              <span>
+                MP4 ready{clip.renderedAspect ? ` · ${clip.renderedAspect}` : ""}. Change anything and click Re-export to update it.
+              </span>
+            ) : (
+              <span>Not exported yet.</span>
+            )}
+          </div>
+        </aside>
       </div>
     </div>
   );

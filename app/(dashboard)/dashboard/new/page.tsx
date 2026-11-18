@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft, Upload, FileVideo, X, Loader2, Lightbulb, Film } from "lucide-react";
@@ -20,6 +20,19 @@ export default function NewProjectPage() {
   const [idea, setIdea] = useState("");
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [linkNote, setLinkNote] = useState<string | null>(null);
+
+  // ?url= from the dashboard command bar. Plain text becomes an idea; a link
+  // can't be fetched for scripts yet, so show it and ask for the file.
+  useEffect(() => {
+    const raw = new URLSearchParams(window.location.search).get("url")?.trim();
+    if (!raw) return;
+    if (/^https?:\/\//i.test(raw)) setLinkNote(raw);
+    else {
+      setMode("idea");
+      setIdea(raw);
+    }
+  }, []);
 
   const generateUploadUrlMut = useMutation(api.projects.generateUploadUrl);
   const createDraftMut = useMutation(api.projects.createDraft);
@@ -140,6 +153,13 @@ export default function NewProjectPage() {
         {error && (
           <div className="border border-red-900/50 bg-red-950/30 rounded-md p-3 mb-6 text-red-300 text-sm">
             {error}
+          </div>
+        )}
+
+        {linkNote && mode === "video" && !file && (
+          <div className="border border-line bg-surface rounded-md p-3 mb-6 text-sm text-muted">
+            <p className="truncate text-fg mb-1">{linkNote}</p>
+            Scripts can&apos;t be made straight from a link yet — download the video and drop the file below.
           </div>
         )}
 

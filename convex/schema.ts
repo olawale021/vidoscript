@@ -195,6 +195,15 @@ export default defineSchema({
     sourceUrl: v.optional(v.string()),
     rightsConfirmedAt: v.optional(v.number()), // user confirmed they own / may use the video
     findMore: v.optional(v.boolean()), // queued only to find extra clips (transcript reused)
+    moreCount: v.optional(v.number()), // extra clips requested via "Find more"
+    stepDetail: v.optional(v.string()), // live detail for the current step, e.g. "Downloading 45% of 690 MB"
+    // Which downloader to use: auto (main → backup → main again), or the
+    // user's pick after a blocked attempt. "premium" = backup + residential proxy.
+    downloader: v.optional(v.union(v.literal("auto"), v.literal("main"), v.literal("backup"), v.literal("premium"))),
+    blocked: v.optional(v.boolean()), // the last attempt was blocked by YouTube
+    replaceIds: v.optional(v.array(v.id("clips"))), // clips waiting for a replacement
+    // Clip scout: moments viewers point to (timestamped comments, "most replayed").
+    hints: v.optional(v.array(v.object({ start: v.number(), end: v.number(), label: v.string() }))),
     // Link lookup (before download): shown to the user to approve.
     thumbnailUrl: v.optional(v.string()),
     channelName: v.optional(v.string()),
@@ -256,7 +265,13 @@ export default defineSchema({
     // ── User rating (feeds the clip finder's preferences) ──
     rating: v.optional(v.union(v.literal(1), v.literal(-1))),
     ratingReasons: v.optional(v.array(v.string())),
+    ratingNote: v.optional(v.string()), // the creator's own words (Replace)
     ratedAt: v.optional(v.number()),
+    // ── Replace: the AI swaps a rejected clip for a different moment ──
+    hidden: v.optional(v.boolean()), // replaced: kept only so the AI learns from it
+    replacing: v.optional(v.boolean()), // replacement being found (card shows a placeholder)
+    replacesClipId: v.optional(v.id("clips")),
+    slotScore: v.optional(v.number()), // sort position inherited from the replaced clip
     // ── Editor settings (Phase 2) ──
     aspect: v.optional(v.union(v.literal("9:16"), v.literal("1:1"), v.literal("16:9"))),
     captionStyle: v.optional(
@@ -341,4 +356,203 @@ export default defineSchema({
     currentRenderId: v.optional(v.id("renders")),
     createdAt: v.number(),
   }).index("by_created", ["createdAt"]),
+
+  // ── Story Studio (types/story.ts) ──
+  stories: defineTable({
+    userId: v.string(),
+    title: v.string(),
+    idea: v.string(),
+    aspect: v.union(v.literal("9:16"), v.literal("16:9")),
+    targetSec: v.number(),
+    style: v.string(),
+    styleNotes: v.optional(v.string()),
+    narratorVoice: v.string(),
+    step: v.union(v.literal("script"), v.literal("plan"), v.literal("cast"), v.literal("board"), v.literal("export")),
+    script: v.optional(v.string()),
+    hook: v.optional(v.string()),
+    bible: v.optional(v.any()), // StoryBible
+    captionStyle: v.optional(v.string()),
+    videoModel: v.optional(v.string()), // Phase 2 default for "Animate"
+    musicTrack: v.optional(v.union(v.string(), v.null())), // STORY_MUSIC id, null = none
+    musicVolume: v.optional(v.number()),
+    seriesId: v.optional(v.id("series")),
+    outputKey: v.optional(v.string()),
+    renderStatus: v.optional(v.union(v.literal("queued"), v.literal("rendering"), v.literal("done"), v.literal("failed"))),
+    renderProgress: v.optional(v.number()),
+    renderError: v.optional(v.union(v.string(), v.null())),
+    costUsd: v.number(),
+    error: v.optional(v.union(v.string(), v.null())),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_user", ["userId", "createdAt"]),
+
+  storyShots: defineTable({
+    storyId: v.id("stories"),
+    userId: v.string(),
+    order: v.number(),
+    narration: v.string(),
+    speaker: v.string(), // "narrator" or a character id
+    characters: v.array(v.string()),
+    location: v.optional(v.union(v.string(), v.null())),
+    camera: v.string(),
+    imagePrompt: v.string(),
+    motionPrompt: v.optional(v.string()), // Phase 2 (AI video)
+    mode: v.optional(v.string()), // "still" | "video"
+    // Phase 2: AI video clip made from the still (Higgsfield image-to-video).
+    videoModel: v.optional(v.string()),
+    videoKey: v.optional(v.union(v.string(), v.null())),
+    videoStatus: v.optional(v.string()),
+    videoError: v.optional(v.union(v.string(), v.null())),
+    videoSec: v.optional(v.number()),
+    videoCostUsd: v.optional(v.number()),
+    stillKey: v.optional(v.union(v.string(), v.null())),
+    stillStatus: v.string(),
+    stillError: v.optional(v.union(v.string(), v.null())),
+    continuity: v.optional(v.union(v.object({ ok: v.boolean(), issue: v.optional(v.string()) }), v.null())),
+    audioKey: v.optional(v.union(v.string(), v.null())),
+    audioSec: v.optional(v.number()),
+    words: v.optional(v.array(v.object({ w: v.string(), s: v.number(), e: v.number() }))),
+    audioStatus: v.string(),
+    audioError: v.optional(v.union(v.string(), v.null())),
+  }).index("by_story", ["storyId", "order"]),
+
+  // ── Clip scout: YouTube videos worth clipping ──
+  scoutTargets: defineTable({
+    userId: v.string(),
+    kind: v.union(v.literal("keyword"), v.literal("channel")),
+    query: v.string(), // keyword, or what the user pasted for a channel
+    channelId: v.optional(v.string()),
+    channelTitle: v.optional(v.string()),
+    uploadsPlaylistId: v.optional(v.string()),
+    clipFriendly: v.boolean(),
+    everyHours: v.number(),
+    enabled: v.boolean(),
+    lastScannedAt: v.optional(v.number()),
+    lastError: v.optional(v.union(v.string(), v.null())),
+    createdAt: v.number(),
+  })
+    .index("by_user", ["userId", "createdAt"])
+    .index("by_due", ["enabled", "lastScannedAt"]),
+
+  scoutVideos: defineTable({
+    userId: v.string(),
+    videoId: v.string(),
+    title: v.string(),
+    channelId: v.string(),
+    channelTitle: v.string(),
+    thumbnail: v.optional(v.string()),
+    publishedAt: v.number(),
+    durationSec: v.number(),
+    views: v.number(),
+    likes: v.number(),
+    comments: v.number(),
+    channelMedianViews: v.optional(v.number()),
+    score: v.number(),
+    breakdown: v.any(), // { momentum, outperformance, engagement, moments, format, freshness, competition }
+    moments: v.array(
+      v.object({ t: v.number(), label: v.string(), mentions: v.number(), source: v.string() })
+    ),
+    aiNote: v.optional(v.string()),
+    analyzedAt: v.optional(v.number()),
+    aiTries: v.optional(v.number()), // AI note attempts; stops after 2 failures
+    heatmapAt: v.optional(v.number()),
+    competition: v.optional(v.object({ shorts: v.number(), topViews: v.number(), checkedAt: v.number() })),
+    clipFriendly: v.boolean(),
+    status: v.union(v.literal("new"), v.literal("saved"), v.literal("dismissed"), v.literal("clipped")),
+    clipSourceId: v.optional(v.id("clipSources")),
+    targetIds: v.array(v.id("scoutTargets")),
+    busy: v.optional(v.union(v.string(), v.null())), // "heatmap" | "competition" while running
+    // The user's taste: 👍/👎 + reasons/note (fed back into scoring and the AI).
+    rating: v.optional(v.number()), // 1 | -1 (unset = not rated)
+    ratingReasons: v.optional(v.array(v.string())),
+    ratingNote: v.optional(v.string()),
+    ratedAt: v.optional(v.number()),
+    // AI's 0–100 guess of how well this matches the user's taste, and why.
+    fit: v.optional(v.number()),
+    fitWhy: v.optional(v.string()),
+    firstSeenAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_user_score", ["userId", "score"])
+    .index("by_user_video", ["userId", "videoId"])
+    .index("by_user_channel", ["userId", "channelId"])
+    .index("by_user_rated", ["userId", "ratedAt"]),
+
+  // Channel baseline (median views of recent uploads), refreshed daily.
+  scoutChannels: defineTable({
+    channelId: v.string(),
+    title: v.string(),
+    uploadsPlaylistId: v.string(),
+    medianViews: v.union(v.number(), v.null()),
+    country: v.optional(v.string()), // YouTube channel country (ISO 2), when the owner set it
+    updatedAt: v.number(),
+  }).index("by_channel", ["channelId"]),
+
+  // YouTube Data API units used per UTC day (one key shared by the whole app).
+  scoutQuota: defineTable({ day: v.string(), units: v.number() }).index("by_day", ["day"]),
+
+  // Phase 3: a reusable cast + style; each story can be an episode of one.
+  series: defineTable({
+    userId: v.string(),
+    title: v.string(),
+    style: v.string(),
+    styleNotes: v.optional(v.string()),
+    aspect: v.union(v.literal("9:16"), v.literal("16:9")),
+    narratorVoice: v.string(),
+    bible: v.any(), // StoryBible with refKeys under stories/<user>/series/<id>/refs/
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_user", ["userId", "updatedAt"]),
+
+  // What the creator liked / disliked at each step (explicit taps + implicit
+  // signals like redraws). Fed back into the AI prompts (convex/storyWorker.ts).
+  storyFeedback: defineTable({
+    userId: v.string(),
+    storyId: v.id("stories"),
+    stage: v.union(v.literal("script"), v.literal("plan"), v.literal("still"), v.literal("motion"), v.literal("voice"), v.literal("video")),
+    targetId: v.optional(v.string()), // shot id for still / voice
+    rating: v.number(), // 1, -1, or 0 (a note only)
+    reasons: v.array(v.string()),
+    note: v.optional(v.string()),
+    snapshot: v.optional(v.string()), // what was rated
+    implicit: v.boolean(),
+    createdAt: v.number(),
+  })
+    .index("by_user_stage", ["userId", "stage", "createdAt"])
+    .index("by_target", ["storyId", "stage", "targetId"]),
+
+  // Per-user defaults for new stories, clips and downloads (Settings page).
+  userSettings: defineTable({
+    userId: v.string(),
+    defaultNarratorVoice: v.optional(v.string()),
+    defaultStoryAspect: v.optional(v.union(v.literal("9:16"), v.literal("16:9"))),
+    defaultStoryLength: v.optional(v.number()),
+    defaultClipAspect: v.optional(v.union(v.literal("9:16"), v.literal("1:1"), v.literal("16:9"))),
+    defaultFraming: v.optional(v.union(v.literal("fill"), v.literal("fit"))),
+    defaultFitBackground: v.optional(v.union(v.literal("black"), v.literal("blur"))),
+    defaultCaptionStyle: v.optional(
+      v.union(v.literal("bold"), v.literal("karaoke"), v.literal("clean"), v.literal("none"))
+    ),
+    defaultDownloadQuality: v.optional(v.union(v.literal("360"), v.literal("480"), v.literal("720"), v.literal("1080"))),
+    niches: v.optional(v.array(v.string())), // clip niches (preset labels or the user's own), used by Discover + its AI
+    discoverWindowDays: v.optional(v.number()), // keyword scans look this far back: 7 | 30 | 90 | 365
+    discoverLanguage: v.optional(v.union(v.literal("en"), v.literal("any"))),
+    updatedAt: v.number(),
+  }).index("by_user", ["userId"]),
+
+  // One queue for every story step; the worker claims jobs by kind.
+  storyJobs: defineTable({
+    storyId: v.id("stories"),
+    userId: v.string(),
+    kind: v.union(v.literal("script"), v.literal("plan"), v.literal("ref"), v.literal("still"), v.literal("voice"), v.literal("video"), v.literal("render")),
+    targetId: v.optional(v.string()), // shot id, or "character:<id>" / "location:<id>"
+    input: v.optional(v.string()), // e.g. rewrite notes
+    status: v.union(v.literal("queued"), v.literal("working"), v.literal("done"), v.literal("failed")),
+    attempts: v.number(),
+    startedAt: v.optional(v.number()),
+    error: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index("by_status", ["status", "createdAt"])
+    .index("by_story", ["storyId", "status"]),
 });

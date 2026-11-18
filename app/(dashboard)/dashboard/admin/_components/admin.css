@@ -1,0 +1,96 @@
+/* Admin tables and charts (from the redesign prototype). Tables stack into
+   labelled cards on phones: each <td> carries its column name in data-l. */
+
+.adm-tbl {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.adm-tbl th {
+  text-align: left;
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--color-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--color-line);
+  white-space: nowrap;
+}
+.adm-tbl td {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--color-line);
+  vertical-align: middle;
+  color: var(--color-muted);
+}
+.adm-tbl tbody tr:last-child td {
+  border-bottom: 0;
+}
+.adm-tbl .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.adm-tbl tbody tr.link {
+  cursor: pointer;
+}
+.adm-tbl tbody tr.link:hover td {
+  background: var(--color-surface-2);
+}
+.adm-tbl tr.resolved {
+  opacity: 0.4;
+}
+
+.adm-chart {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.adm-chart text {
+  fill: var(--color-faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+@media (max-width: 620px) {
+  .adm-tbl thead {
+    display: none;
+  }
+  .adm-tbl tr {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--color-line);
+  }
+  .adm-tbl tbody tr:last-child {
+    border-bottom: 0;
+  }
+  .adm-tbl td {
+    border: 0;
+    padding: 0;
+    text-align: left !important;
+    min-width: 0;
+    white-space: normal;
+  }
+  .adm-tbl td:first-child,
+  .adm-tbl td[data-wide] {
+    grid-column: 1 / -1;
+    min-width: 0 !important;
+  }
+  .adm-tbl td[data-l]:not(:first-child)::before {
+    content: attr(data-l);
+    display: block;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--color-faint);
+    margin-bottom: 1px;
+  }
+  .adm-tbl td[data-l=""]::before {
+    display: none;
+  }
+  .adm-tbl .adm-share {
+    width: 36px;
+  }
+}
