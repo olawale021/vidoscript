@@ -673,3 +673,17 @@ export async function planScenes(
 
   return JSON.parse(content);
 }
+
+// Clip post copy (caption + 5 hashtags) on OpenAI. Same prompt as the Gemini version.
+const POST_COPY_MODEL = process.env.POST_COPY_MODEL?.trim() || "gpt-5.5";
+export async function writeClipPostCopyOpenAI(input: { title: string; hook: string; transcript: string }) {
+  const { clipPostCopyPrompt, cleanClipPostCopy } = await import("@/lib/gemini");
+  const res = await getOpenAIClient().chat.completions.create({
+    model: POST_COPY_MODEL,
+    messages: [{ role: "user", content: clipPostCopyPrompt(input) }],
+    response_format: { type: "json_object" },
+    reasoning_effort: "low",
+  });
+  trackOpenAI(res, "clips.postCopy", POST_COPY_MODEL);
+  return cleanClipPostCopy(JSON.parse(res.choices[0]?.message?.content ?? "{}"));
+}

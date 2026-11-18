@@ -24,12 +24,18 @@ AP=$(get APIFY_TOKEN "$stack.app.env")
 HK=$(get HIGGSFIELD_API_KEY "$stack.app.env")
 YK=$(get YOUTUBE_API_KEY "$stack.app.env")
 GK=$(get GEMINI_API_KEY "$stack.app.env")
+# Social posting (direct platform APIs)
+STK=$(get SOCIAL_TOKEN_KEY "$stack.app.env")
+IGI=$(get INSTAGRAM_APP_ID "$stack.app.env"); IGS=$(get INSTAGRAM_APP_SECRET "$stack.app.env")
+MAI=$(get META_APP_ID "$stack.app.env"); MAS=$(get META_APP_SECRET "$stack.app.env"); IGC=$(get INSTAGRAM_CONFIG_ID "$stack.app.env")
+GCI=$(get GOOGLE_OAUTH_CLIENT_ID "$stack.app.env"); GCS=$(get GOOGLE_OAUTH_CLIENT_SECRET "$stack.app.env")
+TKK=$(get TIKTOK_CLIENT_KEY "$stack.app.env"); TKS=$(get TIKTOK_CLIENT_SECRET "$stack.app.env")
 [ -n "$AK" ] || { echo "no CONVEX_SELF_HOSTED_ADMIN_KEY in $stack.env" >&2; exit 1; }
 
 docker run --rm --network "vidoscript-${stack}_default" -v "$(cd .. && pwd)":/src:ro \
   -e CONVEX_SELF_HOSTED_URL=http://backend:3210 -e CONVEX_SELF_HOSTED_ADMIN_KEY="$AK" \
   -e ISSUER="$ISSUER" -e WS="$WS" -e IS="$IS" -e AE="$AE" -e AU="$AU" \
-  -e R2T="$R2T" -e R2A="$R2A" -e R2S="$R2S" -e R2E="$R2E" -e R2B="$R2B" -e AP="$AP" -e HK="$HK" -e YK="$YK" -e GK="$GK" -e SP="$stack" node:24-bookworm-slim sh -c '
+  -e R2T="$R2T" -e R2A="$R2A" -e R2S="$R2S" -e R2E="$R2E" -e R2B="$R2B" -e AP="$AP" -e HK="$HK" -e YK="$YK" -e GK="$GK" -e STK="$STK" -e IGI="$IGI" -e IGS="$IGS" -e MAI="$MAI" -e MAS="$MAS" -e IGC="$IGC" -e GCI="$GCI" -e GCS="$GCS" -e TKK="$TKK" -e TKS="$TKS" -e SP="$stack" node:24-bookworm-slim sh -c '
     set -e
     mkdir /app && cd /app
     tar -C /src --exclude=node_modules --exclude=.next -cf - . | tar -xf -
@@ -48,6 +54,16 @@ docker run --rm --network "vidoscript-${stack}_default" -v "$(cd .. && pwd)":/sr
     setenv STORAGE_PREFIX "$SP"
     setenv APIFY_TOKEN "$AP"
     setenv HIGGSFIELD_API_KEY "$HK"
+    setenv SOCIAL_TOKEN_KEY "$STK"
+    setenv INSTAGRAM_APP_ID "$IGI"
+    setenv INSTAGRAM_APP_SECRET "$IGS"
+    setenv META_APP_ID "$MAI"
+    setenv META_APP_SECRET "$MAS"
+    setenv INSTAGRAM_CONFIG_ID "$IGC"
+    setenv GOOGLE_OAUTH_CLIENT_ID "$GCI"
+    setenv GOOGLE_OAUTH_CLIENT_SECRET "$GCS"
+    setenv TIKTOK_CLIENT_KEY "$TKK"
+    setenv TIKTOK_CLIENT_SECRET "$TKS"
     setenv YOUTUBE_API_KEY "$YK"
     setenv GEMINI_API_KEY "$GK"
     npx convex deploy -y 2>&1 | tail -3

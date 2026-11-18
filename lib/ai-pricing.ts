@@ -7,6 +7,8 @@
 
 export const TOKEN_PRICES: Record<string, { input: number; output: number }> = {
   "gpt-4o": { input: 2.5, output: 10 },
+  "gpt-5.5": { input: 5, output: 30 },
+  "gpt-5.4-mini": { input: 0.75, output: 4.5 },
   "gemini-2.5-flash": { input: 0.3, output: 2.5 },
 };
 

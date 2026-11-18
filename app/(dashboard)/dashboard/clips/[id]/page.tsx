@@ -9,6 +9,7 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Button } from "@/components/ui/button";
 import { SaveVideoButton } from "@/components/save-video-button";
+import { PostButton } from "@/components/post-button";
 import { cn } from "@/lib/utils";
 import { Chip, Ring } from "@/components/ui/kit";
 import { StatusLine } from "../_components/status";
@@ -333,7 +334,14 @@ export default function ClipSourcePage({ params }: { params: Promise<{ id: strin
                   <li
                     key={c._id}
                     id={`clip-${c._id}`}
-                    onClick={() => seek(c)}
+                    title="Open in the clip editor"
+                    onClick={(e) => {
+                      // Clicking the card opens the editor; its own buttons, links,
+                      // inputs and the transcript toggle keep their own behaviour.
+                      if ((e.target as HTMLElement).closest("button, a, input, textarea, select, summary, details, label, [role=dialog]")) return;
+                      seek(c);
+                      router.push(`/dashboard/clips/${sourceId}/edit/${c._id}`);
+                    }}
                     className={cn(
                       "grid cursor-pointer gap-2.5 rounded-[12px] border bg-surface p-3.5 transition",
                       sel?._id === c._id ? "border-fg" : "border-line hover:border-line-strong",
@@ -422,11 +430,14 @@ export default function ClipSourcePage({ params }: { params: Promise<{ id: strin
                       </Link>
                       <span className="ml-auto inline-flex items-center">
                         {c.renderStatus === "done" && c.downloadUrl ? (
-                          <SaveVideoButton
-                            downloadUrl={c.downloadUrl}
-                            fileName={`${c.title || "clip"}.mp4`}
-                            label={`MP4${c.renderedAspect ? ` · ${c.renderedAspect}` : ""}`}
-                          />
+                          <span className="inline-flex items-center gap-1.5">
+                            <PostButton sourceType="clip" sourceId={c._id} size="sm" />
+                            <SaveVideoButton
+                              downloadUrl={c.downloadUrl}
+                              fileName={`${c.title || "clip"}.mp4`}
+                              label={`MP4${c.renderedAspect ? ` · ${c.renderedAspect}` : ""}`}
+                            />
+                          </span>
                         ) : c.renderStatus === "queued" || c.renderStatus === "rendering" ? (
                           <span className="inline-flex items-center gap-1 text-xs text-accent">
                             <Loader2 size={12} className="animate-spin" />

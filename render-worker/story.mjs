@@ -21,6 +21,9 @@ const ffmpegPath = process.env.FFMPEG_PATH || ffmpegStatic;
 const TEXT_MODEL = "gemini-2.5-flash";
 const IMAGE_MODEL = "gemini-2.5-flash-image";
 const TTS_MODEL = "gpt-4o-mini-tts";
+// Script writer runs on OpenAI (override with STORY_WRITER_MODEL, e.g. gpt-5.4-mini).
+const WRITER_MODEL = process.env.STORY_WRITER_MODEL?.trim() || "gpt-5.5";
+const WRITER_PRICE = { "gpt-5.5": { input: 5, output: 30 }, "gpt-5.4-mini": { input: 0.75, output: 4.5 } }; // per 1M tokens
 
 // USD — keep in sync with lib/ai-pricing.ts.
 const PRICE = {
@@ -73,6 +76,36 @@ async function geminiJson(convex, job, feature, parts) {
     throw new Error("The AI returned an unreadable answer. Try again.");
   }
   return { data, costUsd };
+}
+
+// OpenAI JSON call (script writer). Same shape as geminiJson.
+async function openaiJson(convex, job, feature, prompt) {
+  if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is not set for the worker");
+  const openai = new OpenAI();
+  const res = await withAiRetry(() =>
+    openai.chat.completions.create({
+      model: WRITER_MODEL,
+      messages: [{ role: "user", content: prompt }],
+      response_format: { type: "json_object" },
+      reasoning_effort: "low",
+    })
+  );
+  const u = res.usage ?? {};
+  const inputTokens = u.prompt_tokens ?? 0;
+  const outputTokens = u.completion_tokens ?? 0; // includes reasoning tokens
+  const price = WRITER_PRICE[WRITER_MODEL] ?? WRITER_PRICE["gpt-5.5"];
+  const costUsd = (inputTokens * price.input + outputTokens * price.output) / 1_000_000;
+  recordUsage(convex, job.userId, { provider: "openai", model: WRITER_MODEL, feature, inputTokens, outputTokens, costUsd });
+  try {
+    return { data: JSON.parse(res.choices?.[0]?.message?.content ?? ""), costUsd };
+  } catch {
+    throw new Error("The AI returned an unreadable answer. Try again.");
+  }
+}
+
+// Text jobs (script, line, plan, plan rewrites) go to the story's chosen AI.
+function aiJson(convex, job, feature, prompt) {
+  return job.textAi === "gemini" ? geminiJson(convex, job, feature, [{ text: prompt }]) : openaiJson(convex, job, feature, prompt);
 }
 
 // The image model sometimes returns no picture (finishReason IMAGE_OTHER) for
@@ -262,11 +295,12 @@ Rules:
 - Mostly NARRATOR lines; short character dialogue only where it adds drama.
 - Every line is spoken aloud: no stage directions, no camera notes, no emojis, no hashtags.
 - Concrete and visual: every line should suggest a picture.
-- Plain, natural spoken English. Short sentences.${castForWriter(job.cast)}${writerPrefs(job.prefs)}
+- Plain, natural spoken English. Short sentences.
+- If the idea involves real people, places or events, keep names, dates and facts accurate. Never invent quotes for real people.${castForWriter(job.cast)}${writerPrefs(job.prefs)}
 
 Return JSON: {"title": "short catchy title", "hook": "on-screen hook text, max 8 words", "lines": [{"speaker": "NARRATOR" or a character's first name, "text": "..."}]}`;
   logPrefs(job, "writer", writerPrefs(job.prefs));
-  const { data, costUsd } = await geminiJson(convex, job, "story.script", [{ text: prompt }]);
+  const { data, costUsd } = await aiJson(convex, job, "story.script", prompt);
   if (!Array.isArray(data.lines) || data.lines.length === 0) throw new Error("The AI returned an empty script. Try again.");
   const title = String(data.title || "Untitled story").slice(0, 120);
   const hook = String(data.hook || "").slice(0, 200);
@@ -278,6 +312,81 @@ Return JSON: {"title": "short catchy title", "hook": "on-screen hook text, max 8
     script: scriptToText({ title, hook, lines: data.lines }),
     costUsd: round4(costUsd),
   });
+}
+
+// One line (rewrite in place; the rest of the script stays as is).
+async function runLine({ convex, secret, job }) {
+  const numbered = splitLines(job.script)
+    .map((l, i) => `${i === job.index ? ">>" : "  "} ${i + 1}. ${l}`)
+    .join("\n");
+  const prompt = `You write narrated short story videos for YouTube Shorts / TikTok / YouTube.
+Idea: ${job.idea}
+
+The full script (the line to rewrite is marked >>):
+${numbered}
+
+Rewrite ONLY line ${job.index + 1}, spoken by ${job.line.who}.${job.note ? `\nThe creator's note: ${job.note}` : "\nMake it stronger: more vivid, natural and gripping, while keeping its meaning."}
+Rules:
+- It must still flow from the line before it into the line after it.
+- About the same length unless the note asks otherwise.
+- Spoken aloud: no stage directions, no speaker name, no quotes around it, no emojis.
+- Plain, natural spoken English. If it's about real people or events, keep facts accurate and don't invent quotes.${writerPrefs(job.prefs)}
+
+Return JSON {"text": "the new line"}`;
+  const { data, costUsd } = await aiJson(convex, job, "story.script", prompt);
+  const text = String(data.text ?? "").replace(/^["“]|["”]$/g, "").trim();
+  if (!text) throw new Error("The AI returned an empty line. Try again.");
+  await convex.mutation(api.storyWorker.saveLine, { secret, jobId: job.jobId, index: job.index, text, costUsd: round4(costUsd) });
+}
+
+// One plan piece: a shot's picture description, or a character's / location's look.
+async function runPiece({ convex, secret, job }) {
+  const isShot = job.pieceKind === "shot";
+  const context = isShot
+    ? `This shot's spoken words: "${job.narration}"
+Characters in the picture: ${job.shotCharacters.map((c) => `${c.name} (${c.look.slice(0, 200)})`).join("; ") || "none"}
+Location: ${job.shotLocation ? `${job.shotLocation.name} (${job.shotLocation.look.slice(0, 200)})` : "none set"}`
+    : `This is the fixed look of the ${job.pieceKind} "${job.name}", used for every picture they appear in.`;
+  const prompt = `You are the director of a narrated AI story video. Art style: ${job.style}
+Idea: ${job.idea}
+
+${context}
+
+Current ${isShot ? "picture description" : "look"}:
+"${job.text}"
+
+Rewrite it.${job.note ? ` The creator's note: ${job.note}` : " Make it clearer, more specific and more visual."}
+Rules:
+${
+  isShot
+    ? `- Describe what the picture shows at this moment: action, expressions, composition. Name characters; don't re-describe their looks.
+- No text, captions, speech bubbles or logos in the picture.`
+    : job.pieceKind === "character"
+      ? "- A fixed visual description: age, build, skin tone, face, hair, outfit with exact colours, one distinctive detail."
+      : "- A fixed visual description: place, time of day, weather, lighting, key objects, colours."
+}
+- One short paragraph, under 80 words.
+
+Return JSON {"text": "..."}`;
+  const { data, costUsd } = await aiJson(convex, job, "story.plan", prompt);
+  const text = String(data.text ?? "").trim();
+  if (!text) throw new Error("The AI returned an empty answer. Try again.");
+  await convex.mutation(api.storyWorker.savePiece, { secret, jobId: job.jobId, text, costUsd: round4(costUsd) });
+}
+
+// "WHO: text" lines of a script (TITLE / HOOK skipped; continuation lines joined).
+function splitLines(script) {
+  const out = [];
+  for (const raw of String(script).split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const m = line.match(/^([A-Za-z][\w .'’()-]{0,40}?):\s*(.*)$/);
+    if (m && ["TITLE", "HOOK"].includes(m[1].trim().toUpperCase())) continue;
+    if (m) out.push(`${m[1].trim()}: ${m[2]}`);
+    else if (out.length) out[out.length - 1] += ` ${line}`;
+    else out.push(`NARRATOR: ${line}`);
+  }
+  return out;
 }
 
 // ── plan (Director) ──
@@ -297,7 +406,11 @@ SCRIPT:
 ${job.script}
 
 Art style: ${job.style}
-Aim for about ${shotCount} shots (each 3–8 seconds of voiceover).${castForDirector(job.cast)}
+Aim for about ${shotCount} shots (each 3–8 seconds of voiceover).${castForDirector(job.cast)}${
+    job.notes && job.currentPlan
+      ? `\n\nTHE CURRENT PLAN (revise it; keep what already works, change what the notes ask for):\n${job.currentPlan}\n\nTHE CREATOR'S NOTES FOR THIS RE-PLAN (follow them closely, even if that means more or fewer shots, new locations or characters):\n${job.notes}`
+      : ""
+  }
 Character voices to choose from: ${job.voices.join(", ")} (the narrator uses "${job.narratorVoice}" — give speaking characters different voices).
 
 Return JSON:
@@ -316,13 +429,13 @@ Return JSON:
 }
 
 Rules:
-- The shots' narration, read in order, must contain every spoken line of the script, word for word (drop only the TITLE and HOOK labels). Split long lines across shots; 6–22 words per shot.
+- The shots' narration, read in order, must contain every spoken line of the script, word for word. The TITLE and HOOK lines are NOT spoken: never put their text into any shot's narration. Split long lines across shots; 6–22 words per shot.
 - Only create characters who are seen in 2 or more shots (max 5) and locations used in 2 or more shots (max 5). Ids are lowercase slugs.
 - Vary the camera: mix wide and close shots; no more than two identical camera moves in a row.
 - Pictures never contain text, captions, speech bubbles, logos or watermarks.
 - Keep every picture with a child open, public and well lit: never show a child being led, taken or followed somewhere hidden, narrow, dark or secluded, or alone with an adult or stranger. Show those story moments neutrally (e.g. walking along a busy street) — the narration carries the meaning. (Image safety filters refuse such pictures.)${directorPrefs(job.prefs)}`;
   logPrefs(job, "director", directorPrefs(job.prefs));
-  const { data, costUsd } = await geminiJson(convex, job, "story.plan", [{ text: prompt }]);
+  const { data, costUsd } = await aiJson(convex, job, "story.plan", prompt);
   const voices = new Set(job.voices);
   const characters = (Array.isArray(data.characters) ? data.characters : []).slice(0, 5).map((c, i) => ({
     id: slug(c.id || c.name) || `c${i}`,
@@ -361,12 +474,39 @@ Rules:
 
 // ── ref (Art department: reference images) ──
 
+// Image prompts never carry character names: the image model refuses to draw
+// real public figures by name (e.g. "Fela Kuti" → IMAGE_OTHER), and names add
+// nothing visual. Characters become "Person A", "Person B"…; their looks and
+// reference pictures carry how they appear.
+const NAME_STOP = new Set(["the", "young", "old", "older", "little", "big", "mr", "mrs", "miss", "dr", "baby", "man", "woman", "boy", "girl"]);
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function nameAliases(names) {
+  const count = new Map();
+  for (const n of names) for (const t of new Set(n.toLowerCase().split(/\s+/))) count.set(t, (count.get(t) ?? 0) + 1);
+  return names.map((name, i) => ({
+    name,
+    alias: `Person ${String.fromCharCode(65 + (i % 26))}`,
+    // Full name first, then distinctive single words of it ("Fela", "Kuti").
+    patterns: [
+      name,
+      ...name.split(/\s+/).filter((t) => t.length >= 3 && !NAME_STOP.has(t.toLowerCase()) && count.get(t.toLowerCase()) === 1),
+    ],
+  }));
+}
+function scrubNames(text, aliases) {
+  let out = String(text ?? "");
+  for (const a of aliases) for (const p of a.patterns) out = out.replace(new RegExp(`(?<![\\w-])${escapeRe(p)}(?![\\w-])`, "gi"), a.alias);
+  return out;
+}
+const aliasOf = (aliases, name) => aliases.find((a) => a.name === name)?.alias ?? name;
+
 async function runRef({ convex, secret, job }) {
   const { item, refKind } = job;
+  const solo = refKind === "character" ? nameAliases([item.name]) : [];
   const prompt =
     refKind === "character"
       ? `Character reference image for an illustrated story. Style: ${job.style}.
-${item.name}: ${item.look}.
+The character: ${scrubNames(item.look, solo).replace(/Person A/g, "the character")}.
 Full body, standing, facing the camera, neutral expression, plain light grey studio background, even soft lighting, the whole outfit clearly visible. Exactly one person. No text, no labels, no watermark.`
       : `Establishing shot of a location for an illustrated story. Style: ${job.style}.
 ${item.name}: ${item.look}.
@@ -381,20 +521,29 @@ No people. No text, no signs with words, no watermark.`;
 // Keep this prompt short and the reference wording soft: long prompts, or
 // "must look exactly like" a photo-real reference, make the image model refuse
 // (finishReason IMAGE_OTHER). The reference images carry the looks.
+function castAliases(job) {
+  return nameAliases(job.castNames?.length ? job.castNames : job.characters.map((c) => c.name));
+}
+
 async function stillParts(job, refs, fix) {
-  const hasRef = (name) => refs.some((r) => r.label === name);
-  const chars = job.characters.map((c) => (hasRef(c.name) ? c.name : `${c.name} (${c.look})`));
-  const loc = job.location ? (hasRef(job.location.name) ? job.location.name : `${job.location.name} (${job.location.look})`) : null;
+  const aliases = castAliases(job);
+  const scrub = (t) => scrubNames(t, aliases);
+  const hasRef = (label) => refs.some((r) => r.label === label);
+  const chars = job.characters.map((c) => {
+    const a = aliasOf(aliases, c.name);
+    return hasRef(a) ? a : `${a} (${scrub(c.look)})`;
+  });
+  const loc = job.location ? (hasRef(job.location.name) ? job.location.name : `${job.location.name} (${scrub(job.location.look)})`) : null;
   const parts = [
     {
       text: [
         `Create one frame of an illustrated story video. Style: ${job.style}. Framing: ${CAMERA_TEXT[job.camera] ?? CAMERA_TEXT.static}.`,
-        `Scene: ${job.imagePrompt}`,
+        `Scene: ${scrub(job.imagePrompt)}`,
         loc ? `Location: ${loc}.` : "",
         chars.length ? `Characters in the frame: ${chars.join(", ")}.` : "",
         refs.length ? "Use the attached reference images as the character design and the setting, keeping the same outfit and colours." : "",
         ...stillRules(job.prefs),
-        fix ? `Also fix: ${fix}` : "",
+        fix ? `Also fix: ${scrub(fix)}` : "",
         "No text, captions, speech bubbles, logos or watermarks.",
       ]
         .filter(Boolean)
@@ -427,23 +576,41 @@ Return JSON {"ok": true|false, "issue": "short description of the contradiction,
 async function runStill({ convex, secret, job }) {
   logPrefs(job, "still rules", stillRules(job.prefs).join(" "));
   const refs = [];
-  for (const c of job.characters) if (c.refUrl) refs.push({ kind: "character", label: c.name, part: await imagePart(c.refUrl) });
+  const aliases = castAliases(job);
+  for (const c of job.characters) if (c.refUrl) refs.push({ kind: "character", label: aliasOf(aliases, c.name), part: await imagePart(c.refUrl) });
   if (job.location?.refUrl) refs.push({ kind: "location", label: job.location.name, part: await imagePart(job.location.refUrl) });
 
   let cost = 0;
   let img;
   let rewrittenPrompt = null;
+  let usedRefs = refs; // the references the final picture was drawn with
   try {
     img = await geminiImage(convex, job, "story.image", await stillParts(job, refs), job.aspect);
   } catch (e) {
     if (!isRefusal(e)) throw e;
+    // A character reference that looks like a real, famous person (e.g. a
+    // portrait of Fela Kuti) makes the image model refuse. Try once without the
+    // character references, with their looks written out instead.
+    const noCharRefs = refs.filter((r) => r.kind !== "character");
+    if (noCharRefs.length < refs.length) {
+      try {
+        console.warn(`[story] still ${job.shotId}: refused with character references; retrying without them`);
+        img = await geminiImage(convex, job, "story.image", await stillParts(job, noCharRefs), job.aspect);
+        usedRefs = noCharRefs;
+      } catch (e2) {
+        if (!isRefusal(e2)) throw e2;
+      }
+    }
+  }
+  if (!img) {
     // The image model's safety filter refused the description (often a child
     // in a secluded place). Rewrite the same moment safely and draw again.
     const safe = await safeRewrite(convex, job);
     cost += safe.costUsd;
     console.warn(`[story] still ${job.shotId}: refused; retrying with a safer description`);
     try {
-      img = await geminiImage(convex, job, "story.image", await stillParts({ ...job, imagePrompt: safe.text }, refs), job.aspect);
+      usedRefs = refs.filter((r) => r.kind !== "character");
+      img = await geminiImage(convex, job, "story.image", await stillParts({ ...job, imagePrompt: safe.text }, usedRefs), job.aspect);
     } catch (e2) {
       if (!isRefusal(e2)) throw e2;
       throw new Error(
@@ -457,12 +624,17 @@ async function runStill({ convex, secret, job }) {
   cost += check.costUsd;
   if (check.result && !check.result.ok) {
     // One automatic retry with the problem spelled out.
-    const retry = await geminiImage(convex, job, "story.image", await stillParts(job, refs, check.result.issue), job.aspect);
-    cost += retry.costUsd;
-    const recheck = await continuityCheck(convex, job, refs, retry);
-    cost += recheck.costUsd;
-    img = retry;
-    check = recheck;
+    const retry = await geminiImage(convex, job, "story.image", await stillParts(job, usedRefs, check.result.issue), job.aspect).catch((e) => {
+      if (isRefusal(e)) return null; // keep the first picture
+      throw e;
+    });
+    if (retry) {
+      cost += retry.costUsd;
+      const recheck = await continuityCheck(convex, job, refs, retry);
+      cost += recheck.costUsd;
+      img = retry;
+      check = recheck;
+    }
   }
   const key = await upload(convex, secret, job, "stills", extOf(img.mime), img.buf, img.mime);
   await convex.mutation(api.storyWorker.saveStill, {
@@ -546,6 +718,10 @@ async function runVoice({ convex, secret, job }) {
         job.speakerName
           ? `You are ${job.speakerName}, a character in a story. Speak this line naturally, with real emotion.`
           : "You are narrating a gripping short story video. Warm, expressive, confident; natural pacing with brief dramatic pauses.",
+        // Age, accent and manner from the character's description (e.g. an elderly Lagos man → older voice, Nigerian accent).
+        job.speakerLook
+          ? `Who you are: ${String(job.speakerLook).slice(0, 300)}. Use an age, accent and manner of speaking that fit this person.`
+          : "",
         voiceTweaks(job.prefs),
       ]
         .filter(Boolean)
@@ -904,7 +1080,7 @@ async function runTalking({ convex, secret, job }) {
   }
 }
 
-const RUNNERS = { script: runScript, plan: runPlan, ref: runRef, still: runStill, voice: runVoice, video: runVideo, render: runRender };
+const RUNNERS = { script: runScript, line: runLine, piece: runPiece, plan: runPlan, ref: runRef, still: runStill, voice: runVoice, video: runVideo, render: runRender };
 
 export async function runStoryJob({ convex, secret, serveUrl, job }) {
   const run = RUNNERS[job.kind];

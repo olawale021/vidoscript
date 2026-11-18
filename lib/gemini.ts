@@ -590,13 +590,9 @@ Rules:
 }
 
 // Social caption + exactly 5 hashtags for a short clip (clip editor).
-export async function writeClipPostCopy(input: {
-  title: string;
-  hook: string;
-  transcript: string;
-}): Promise<{ caption: string; hashtags: string[] }> {
-  const model = getModel(true);
-  const prompt = `Write the post copy for this short vertical video clip (TikTok / Reels / Shorts).
+// Shared by the Gemini and OpenAI versions of clip post copy.
+export function clipPostCopyPrompt(input: { title: string; hook: string; transcript: string }) {
+  return `Write the post copy for this short vertical video clip (TikTok / Reels / Shorts).
 
 Clip title: ${input.title}
 Hook: ${input.hook}
@@ -612,13 +608,24 @@ Hashtag rules:
 - EXACTLY 5 hashtags, each starting with #, no spaces, specific to the clip's topic and niche.
 - Mix: 2 niche-specific, 2 broader topic, 1 format/platform tag (e.g. #shorts or #fyp only if it fits).
 - No banned or spammy tags, no duplicates.`;
-  const result = await model.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
-  trackGemini(result, "clips.postCopy");
-  const parsed = JSON.parse(result.response.text()) as { caption?: string; hashtags?: unknown[] };
+}
+
+export function cleanClipPostCopy(parsed: { caption?: string; hashtags?: unknown[] }) {
   const tags = (Array.isArray(parsed.hashtags) ? parsed.hashtags : [])
     .map((h) => "#" + String(h).replace(/^#+/, "").replace(/[^\p{L}\p{N}_]/gu, ""))
     .filter((h, i, all) => h.length > 1 && all.indexOf(h) === i)
     .slice(0, 5);
   if (tags.length < 5) throw new Error("The AI returned too few hashtags — try again");
   return { caption: String(parsed.caption ?? "").trim().slice(0, 2200), hashtags: tags };
+}
+
+export async function writeClipPostCopy(input: {
+  title: string;
+  hook: string;
+  transcript: string;
+}): Promise<{ caption: string; hashtags: string[] }> {
+  const model = getModel(true);
+  const result = await model.generateContent({ contents: [{ role: "user", parts: [{ text: clipPostCopyPrompt(input) }] }] });
+  trackGemini(result, "clips.postCopy");
+  return cleanClipPostCopy(JSON.parse(result.response.text()));
 }

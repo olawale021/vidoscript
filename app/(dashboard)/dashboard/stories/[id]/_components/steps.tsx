@@ -22,12 +22,14 @@ import {
   Plus,
   RefreshCw,
   Trash2,
+  Undo2,
   Wand2,
 } from "lucide-react";
 import { api } from "@/convex/_generated/api";
 import { Button } from "@/components/ui/button";
 import { Bar, Eyebrow, Panel, PanelBody, PanelHeader, Segmented, Tone } from "@/components/ui/kit";
 import { SaveVideoButton } from "@/components/save-video-button";
+import { PostButton } from "@/components/post-button";
 import { cn } from "@/lib/utils";
 import { StoryComposition } from "@/remotion/Story";
 import { FeedbackBar, type Ratings } from "./feedback";
@@ -42,6 +44,7 @@ import {
   STORY_FPS,
   STORY_VIDEO_MODELS,
   STORY_VOICES,
+  TEXT_AIS,
   MOTION_MODEL_IDS,
   TALKING_MODEL,
   isTalking,
@@ -167,16 +170,140 @@ function StepLayout({
 
 // ── 1. Script ──
 
+const LINE_CHIPS = ["Shorter", "More emotional", "Punchier", "Simpler words", "More factual", "Funnier"];
+
+// One script line: tap to edit it yourself or have the AI rewrite just this line.
+function ScriptLineRow({
+  story,
+  index,
+  line,
+  run,
+  open,
+  onToggle,
+  busy,
+  locked,
+}: {
+  story: Story;
+  index: number;
+  line: { who: string; text: string; narrator: boolean };
+  run: Run;
+  open: boolean;
+  onToggle: () => void;
+  busy: boolean;
+  locked: boolean;
+}) {
+  const setLine = useMutation(api.stories.setLine);
+  const rewriteLine = useMutation(api.stories.rewriteLine);
+  const [text, setText] = useState(line.text);
+  const [note, setNote] = useState("");
+  useEffect(() => setText(line.text), [line.text]);
+  const edited = text.trim() !== line.text.trim();
+  return (
+    <div className={cn("grid min-w-0 rounded-lg transition", open ? "bg-surface-2 -mx-2 px-2 py-2" : "")}>
+      <button
+        type="button"
+        onClick={locked ? undefined : onToggle}
+        disabled={locked}
+        title={locked ? "Save your edits first" : "Edit or rewrite this line"}
+        className="grid min-w-0 text-left sm:grid-cols-[110px_minmax(0,1fr)] sm:gap-3.5 rounded-md hover:bg-surface-2/60 disabled:hover:bg-transparent"
+      >
+        <span className={cn("text-[11px] uppercase tracking-[0.08em] pt-0.5 truncate", line.narrator ? "text-faint" : "text-[#6fa8ff]")}>
+          {line.who}
+        </span>
+        <p className={cn("font-sans text-[15px] leading-[1.55] break-words", busy ? "text-faint" : "text-fg")}>
+          {busy && <Loader2 size={13} className="mr-1.5 inline animate-spin text-accent" />}
+          {line.text}
+        </p>
+      </button>
+      {open && !locked && (
+        <div className="mt-2 grid gap-2 font-sans sm:ml-[124px]">
+          <textarea
+            aria-label={`Line ${index + 1}`}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            rows={2}
+            className={field}
+          />
+          {edited ? (
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" onClick={() => run(async () => {
+                await setLine({ storyId: story._id, index, text });
+                onToggle();
+              })}>
+                Save line
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setText(line.text)}>
+                Undo
+              </Button>
+            </div>
+          ) : (
+            <>
+              <div className="flex flex-wrap gap-1">
+                {LINE_CHIPS.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => setNote((n) => (n.includes(c) ? n : n ? `${n}. ${c}` : c))}
+                    className="min-h-8 rounded-full border border-line-strong px-2.5 py-1 text-xs text-muted transition hover:text-fg"
+                  >
+                    {c}
+                  </button>
+                ))}
+              </div>
+              <input
+                aria-label="Note for the AI"
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                placeholder="Optional note, e.g. mention the year 1977"
+                className={field}
+              />
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => run(async () => {
+                    await rewriteLine({ storyId: story._id, index, note: note || undefined });
+                    setNote("");
+                    onToggle();
+                  })}
+                >
+                  {busy ? <Loader2 size={13} className="animate-spin" /> : <Wand2 size={13} />} Rewrite this line
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => run(async () => {
+                    if (!window.confirm("Delete this line?")) return;
+                    await setLine({ storyId: story._id, index, text: "" });
+                    onToggle();
+                  })}
+                >
+                  <Trash2 size={13} /> Delete
+                </Button>
+                <span className="text-[11px] text-faint">Takes a few seconds · {story.textAi === "gemini" ? "under a cent" : "≈ $0.02"}</span>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ScriptStep({ story, run, ratings }: StepProps) {
   const updateScript = useMutation(api.stories.updateScript);
   const rewrite = useMutation(api.stories.rewriteScript);
   const confirm = useMutation(api.stories.confirmScript);
+  const undo = useMutation(api.stories.undoScript);
+  const history = story.scriptHistory ?? [];
+  const lastChange = history[history.length - 1];
   const [notes, setNotes] = useState("");
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(story.script ?? "");
   const dirty = draft !== (story.script ?? "");
   useEffect(() => setDraft(story.script ?? ""), [story.script]);
   const parsed = useMemo(() => parseScript(draft), [draft]);
+  const [openLine, setOpenLine] = useState<number | null>(null);
 
   if (story.busy.script) return <Working text="The writer is drafting your script…" />;
   if (!story.script) {
@@ -203,9 +330,21 @@ export function ScriptStep({ story, run, ratings }: StepProps) {
         <div className="grid gap-2.5">
           <div className="flex items-center justify-between gap-3">
             <Eyebrow>{editing ? "Editing script" : "Screenplay"}</Eyebrow>
-            <Button size="sm" variant={editing ? "secondary" : "outline"} onClick={() => setEditing(!editing)}>
-              <Pencil size={13} /> {editing ? "Done" : "Edit"}
-            </Button>
+            <div className="flex items-center gap-1.5">
+              {lastChange && !dirty && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  title={`Go back to the version before: ${lastChange.label} (${history.length} saved version${history.length === 1 ? "" : "s"})`}
+                  onClick={() => run(() => undo({ storyId: story._id }))}
+                >
+                  <Undo2 size={13} /> Undo <span className="max-sm:hidden">{lastChange.label.toLowerCase()}</span>
+                </Button>
+              )}
+              <Button size="sm" variant={editing ? "secondary" : "outline"} onClick={() => setEditing(!editing)}>
+                <Pencil size={13} /> {editing ? "Done" : "Edit"}
+              </Button>
+            </div>
           </div>
           {editing ? (
             <>
@@ -237,17 +376,17 @@ export function ScriptStep({ story, run, ratings }: StepProps) {
                 </div>
               )}
               {parsed.lines.map((l, i) => (
-                <div key={i} className="grid sm:grid-cols-[110px_minmax(0,1fr)] sm:gap-3.5 min-w-0">
-                  <span
-                    className={cn(
-                      "text-[11px] uppercase tracking-[0.08em] pt-0.5 truncate",
-                      l.narrator ? "text-faint" : "text-[#6fa8ff]"
-                    )}
-                  >
-                    {l.who}
-                  </span>
-                  <p className="font-sans text-[15px] text-fg leading-[1.55] break-words">{l.text}</p>
-                </div>
+                <ScriptLineRow
+                  key={`${i}-${l.text.slice(0, 20)}`}
+                  story={story}
+                  index={i}
+                  line={l}
+                  run={run}
+                  open={openLine === i}
+                  onToggle={() => setOpenLine(openLine === i ? null : i)}
+                  busy={story.busy.lines.includes(i)}
+                  locked={dirty}
+                />
               ))}
               <div className="flex justify-between gap-3 text-xs text-faint pt-3 border-t border-dashed border-line-strong">
                 <span>{parsed.words} words</span>
@@ -275,8 +414,8 @@ export function ScriptStep({ story, run, ratings }: StepProps) {
             </Button>
           )}
           <span className={cn(note, "max-md:hidden")}>
-            Lines are <code className="font-mono">NARRATOR:</code> or <code className="font-mono">NAME:</code>. The hook shows on
-            screen and isn&apos;t spoken.
+            Tap a line to edit or rewrite just that line. Lines are <code className="font-mono">NARRATOR:</code> or{" "}
+            <code className="font-mono">NAME:</code>. The hook shows on screen and isn&apos;t spoken.
           </span>
         </>
       }
@@ -285,6 +424,7 @@ export function ScriptStep({ story, run, ratings }: StepProps) {
           <Panel>
             <PanelHeader title="Rewrite" />
             <PanelBody className="grid gap-2.5">
+              <TextAiPicker story={story} run={run} />
               <textarea
                 aria-label="Rewrite notes"
                 value={notes}
@@ -315,6 +455,130 @@ export function ScriptStep({ story, run, ratings }: StepProps) {
         </>
       }
     />
+  );
+}
+
+// Shrink a photo in the browser (max 1600 px, JPEG) before uploading.
+async function shrinkPhoto(file: File): Promise<Blob> {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, 1600 / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  canvas.getContext("2d")!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  return await new Promise((resolve, reject) =>
+    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("Could not read this photo"))), "image/jpeg", 0.9)
+  );
+}
+
+// "Use my photo": a shot's picture, or a character's / location's reference.
+function PhotoButton({ story, target, run, label = "Use my photo" }: { story: Story; target: string; run: Run; label?: string }) {
+  const uploadUrl = useMutation(api.stories.photoUploadUrl);
+  const usePhoto = useMutation(api.stories.usePhoto);
+  const input = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+  const pick = (file: File) =>
+    run(async () => {
+      if (!/^image\/(jpeg|png|webp|heic|heif)$/.test(file.type) && !/\.(jpe?g|png|webp|heic)$/i.test(file.name)) {
+        throw new Error("Pick a photo (JPG, PNG or WebP).");
+      }
+      if (!window.confirm("I own this photo or have permission to use it.")) return;
+      setBusy(true);
+      try {
+        const blob = await shrinkPhoto(file);
+        const { url, key } = await uploadUrl({ storyId: story._id, target, contentType: "image/jpeg" });
+        const res = await fetch(url, { method: "PUT", headers: { "Content-Type": "image/jpeg" }, body: blob });
+        if (!res.ok) throw new Error("Upload failed. Try again.");
+        await usePhoto({ storyId: story._id, target, key, rightsConfirmed: true });
+      } finally {
+        setBusy(false);
+        if (input.current) input.current.value = "";
+      }
+    });
+  return (
+    <>
+      <input
+        ref={input}
+        type="file"
+        accept="image/jpeg,image/png,image/webp"
+        className="hidden"
+        onChange={(e) => e.target.files?.[0] && pick(e.target.files[0])}
+      />
+      <Button size="sm" variant="outline" disabled={busy} onClick={() => input.current?.click()}>
+        {busy ? <Loader2 size={12} className="animate-spin" /> : <ImageIcon size={12} />} {busy ? "Uploading…" : label}
+      </Button>
+    </>
+  );
+}
+
+// Which AI writes this story's text (script, line rewrites, plan, plan rewrites).
+function TextAiPicker({ story, run }: { story: Story; run: Run }) {
+  const setTextAi = useMutation(api.stories.setTextAi);
+  const current = TEXT_AIS.find((x) => x.id === story.textAi) ?? TEXT_AIS[0];
+  return (
+    <div className="grid gap-1.5">
+      <Segmented
+        size="sm"
+        label="Writing AI"
+        value={story.textAi}
+        onChange={(x) => run(() => setTextAi({ storyId: story._id, textAi: x as "openai" | "gemini" }))}
+        options={TEXT_AIS.map((x) => ({ value: x.id, label: x.id === "openai" ? "OpenAI" : "Gemini", title: x.label }))}
+      />
+      <span className={note}>
+        {current.label}: {current.note}.
+      </span>
+    </div>
+  );
+}
+
+// "Rewrite with AI" for one plan piece (a shot's picture, or a character's / location's look).
+function AiRewrite({ story, target, run, what }: { story: Story; target: string; run: Run; what: string }) {
+  const rewritePiece = useMutation(api.stories.rewritePiece);
+  const [open, setOpen] = useState(false);
+  const [note, setNoteText] = useState("");
+  const busy = story.busy.pieces.includes(target);
+  if (busy) {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs text-accent">
+        <Loader2 size={12} className="animate-spin" /> Rewriting the {what}…
+      </span>
+    );
+  }
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} className="inline-flex min-h-8 items-center gap-1 px-1 text-xs text-muted hover:text-fg">
+        <Wand2 size={12} /> Rewrite the {what} with AI
+      </button>
+    );
+  }
+  return (
+    <div className="grid gap-1.5">
+      <input
+        aria-label={`Note for rewriting the ${what}`}
+        value={note}
+        onChange={(e) => setNoteText(e.target.value)}
+        placeholder="Optional note, e.g. make him older with a grey beard"
+        className={field}
+        autoFocus
+      />
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          size="sm"
+          onClick={() =>
+            run(async () => {
+              await rewritePiece({ storyId: story._id, target, note: note || undefined });
+              setNoteText("");
+              setOpen(false);
+            })
+          }
+        >
+          <Wand2 size={13} /> Rewrite
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => setOpen(false)}>
+          Cancel
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -373,6 +637,7 @@ function ShotRow({ shot, index, story, run }: { shot: Shot; index: number; story
             className="text-muted"
             onSave={(imagePrompt) => save({ imagePrompt })}
           />
+          <AiRewrite story={story} target={`shot:${shot._id}`} run={run} what="picture" />
           <div className="flex flex-wrap gap-2">
             <select aria-label="Speaker" value={shot.speaker} onChange={(e) => save({ speaker: e.target.value })} className={selectCls}>
               <option value="narrator">Narrator</option>
@@ -519,13 +784,19 @@ function EntityRow({ story, kind, entry, run }: { story: Story; kind: "character
           <Pencil size={13} />
         </button>
       </div>
-      {editing && <BibleFields story={story} kind={kind} entry={entry} run={run} />}
+      {editing && (
+        <>
+          <BibleFields story={story} kind={kind} entry={entry} run={run} />
+          <AiRewrite story={story} target={`${kind}:${entry.id}`} run={run} what="look" />
+        </>
+      )}
     </li>
   );
 }
 
 export function PlanStep({ story, run, ratings }: StepProps) {
   const replan = useMutation(api.stories.replan);
+  const [planNotes, setPlanNotes] = useState("");
   const confirm = useMutation(api.stories.confirmPlan);
   const addShot = useMutation(api.stories.addShot);
   if (story.busy.plan) return <Working text="The director is breaking your script into shots, characters and locations…" />;
@@ -571,9 +842,29 @@ export function PlanStep({ story, run, ratings }: StepProps) {
           <Panel>
             <PanelBody className="grid gap-3">
               <FeedbackBar storyId={story._id} stage="plan" ratings={ratings} label="How's this plan?" />
-              <Button size="sm" variant="outline" className="w-full" onClick={() => run(() => replan({ storyId: story._id }))}>
-                <RefreshCw size={13} /> Re-plan from script
+              <TextAiPicker story={story} run={run} />
+              <textarea
+                aria-label="Re-plan notes"
+                value={planNotes}
+                onChange={(e) => setPlanNotes(e.target.value)}
+                rows={4}
+                placeholder="Notes for the director, e.g. add a veranda where Tunde talks to camera every few lines"
+                className={field}
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                className="w-full"
+                onClick={() =>
+                  run(async () => {
+                    await replan({ storyId: story._id, notes: planNotes || undefined });
+                    setPlanNotes("");
+                  })
+                }
+              >
+                <RefreshCw size={13} /> {planNotes.trim() ? "Re-plan with notes" : "Re-plan from script"}
               </Button>
+              <span className={note}>With notes, the director revises this plan. Without, it starts fresh from the script.</span>
             </PanelBody>
           </Panel>
           <Panel>
@@ -653,6 +944,7 @@ function CastCard({ story, kind, entry, run }: { story: Story; kind: "character"
           <Button size="sm" variant="outline" disabled={busy} onClick={() => run(() => redo({ storyId: story._id, kind, id: entry.id }))}>
             <RefreshCw size={12} /> Redraw
           </Button>
+          <PhotoButton story={story} target={`${kind}:${entry.id}`} run={run} />
           <Button size="sm" variant="ghost" onClick={() => setEditing(!editing)}>
             {editing ? "Done" : "Edit"}
           </Button>
@@ -995,6 +1287,7 @@ function SelectedShot({ shot, index, story, run, ratings }: { shot: Shot; index:
           <Button size="sm" variant="outline" disabled={busyStill} onClick={() => run(() => redoShot({ shotId: shot._id, imagePrompt: prompt }))}>
             <RefreshCw size={12} /> Redraw picture
           </Button>
+          <PhotoButton story={story} target={`shot:${shot._id}`} run={run} />
           <Button size="sm" variant="outline" disabled={busyVoice} onClick={() => run(() => redoVoice({ shotId: shot._id }))}>
             <Mic size={12} /> Re-record voice
           </Button>
@@ -1039,9 +1332,15 @@ export function BoardStep({ story, run, ratings }: StepProps) {
       !(s.videoStatus === "ready" && s.videoModel === model) &&
       !talks(s)
   );
-  // Character lines (not the narrator) that could talk on screen.
+  // Character lines spoken by someone who is in the picture (not voice-over on a flashback).
   const talkable = shots.filter(
-    (s) => s.speaker !== "narrator" && s.stillStatus === "ready" && s.audioStatus === "ready" && !isBusy(s.videoStatus) && !talks(s)
+    (s) =>
+      s.speaker !== "narrator" &&
+      s.characters.includes(s.speaker) &&
+      s.stillStatus === "ready" &&
+      s.audioStatus === "ready" &&
+      !isBusy(s.videoStatus) &&
+      !talks(s)
   );
   const talkCost = talkable.reduce((sum, s) => sum + clipCost(TALKING_MODEL, s.audioSec), 0);
   const animateCost = animatable.reduce((sum, s) => sum + clipCost(model, s.audioSec), 0);
@@ -1321,6 +1620,7 @@ export function ExportStep({ story, run, ratings }: StepProps) {
           {isDone && story.downloadUrl && (
             <SaveVideoButton downloadUrl={story.downloadUrl} fileName={`${story.title}.mp4`} label={`Download MP4 · ${story.aspect}`} size="default" variant="default" />
           )}
+          {isDone && story.downloadUrl && <PostButton sourceType="story" sourceId={story._id} aiGenerated />}
           <Button
             variant={isDone ? "outline" : "default"}
             disabled={rendering}

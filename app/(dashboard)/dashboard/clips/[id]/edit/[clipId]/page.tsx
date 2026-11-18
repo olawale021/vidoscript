@@ -9,6 +9,7 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Button } from "@/components/ui/button";
 import { SaveVideoButton } from "@/components/save-video-button";
+import { PostButton } from "@/components/post-button";
 import { cn } from "@/lib/utils";
 import { ClipComposition, clipDurationInFrames, clipTimeline } from "@/remotion/Clip";
 import { Segmented } from "@/components/ui/kit";
@@ -238,7 +239,10 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
             </div>
           </div>
           {clip.renderStatus === "done" && data.downloadUrl && !rendering && (
-            <SaveVideoButton downloadUrl={data.downloadUrl} fileName={`${s.title || "clip"}.mp4`} />
+            <>
+              <PostButton sourceType="clip" sourceId={clipId} size="sm" />
+              <SaveVideoButton downloadUrl={data.downloadUrl} fileName={`${s.title || "clip"}.mp4`} />
+            </>
           )}
           <Button
             size="sm"
@@ -544,8 +548,11 @@ export default function ClipEditorPage({ params }: { params: Promise<{ id: strin
                 {clip.renderStatus === "queued" ? "Export queued…" : `Rendering ${clip.renderProgress ?? 0}%`}
               </span>
             ) : clip.renderStatus === "done" ? (
-              <span>
-                MP4 ready{clip.renderedAspect ? ` · ${clip.renderedAspect}` : ""}. Change anything and click Re-export to update it.
+              <span className="flex flex-wrap items-center gap-2">
+                <span>
+                  MP4 ready{clip.renderedAspect ? ` · ${clip.renderedAspect}` : ""}. Change anything and click Re-export to update it.
+                </span>
+                {data.downloadUrl && <PostButton sourceType="clip" sourceId={clipId} size="sm" />}
               </span>
             ) : (
               <span>Not exported yet.</span>

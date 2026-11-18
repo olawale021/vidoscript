@@ -369,6 +369,11 @@ export default defineSchema({
     narratorVoice: v.string(),
     step: v.union(v.literal("script"), v.literal("plan"), v.literal("cast"), v.literal("board"), v.literal("export")),
     script: v.optional(v.string()),
+    textAi: v.optional(v.union(v.literal("openai"), v.literal("gemini"))), // unset = the user's default
+    // Earlier script versions for Undo (newest last, max 10).
+    scriptHistory: v.optional(
+      v.array(v.object({ script: v.string(), title: v.string(), hook: v.optional(v.string()), label: v.string(), at: v.number() }))
+    ),
     hook: v.optional(v.string()),
     bible: v.optional(v.any()), // StoryBible
     captionStyle: v.optional(v.string()),
@@ -537,14 +542,154 @@ export default defineSchema({
     niches: v.optional(v.array(v.string())), // clip niches (preset labels or the user's own), used by Discover + its AI
     discoverWindowDays: v.optional(v.number()), // keyword scans look this far back: 7 | 30 | 90 | 365
     discoverLanguage: v.optional(v.union(v.literal("en"), v.literal("any"))),
+    defaultTextAi: v.optional(v.union(v.literal("openai"), v.literal("gemini"))),
     updatedAt: v.number(),
   }).index("by_user", ["userId"]),
+
+  // ── Social posting & tracking (direct platform APIs) ──
+
+  // A connected account (one per platform account). Tokens are AES-GCM
+  // encrypted (SOCIAL_TOKEN_KEY) and only decrypted inside socialNode.ts.
+  socialAccounts: defineTable({
+    userId: v.string(),
+    platform: v.union(v.literal("instagram"), v.literal("youtube"), v.literal("tiktok")),
+    externalId: v.string(), // platform account id
+    handle: v.string(),
+    name: v.optional(v.string()),
+    avatarUrl: v.optional(v.string()),
+    accessTokenEnc: v.string(),
+    refreshTokenEnc: v.optional(v.string()),
+    tokenExpiresAt: v.optional(v.number()),
+    scopes: v.optional(v.array(v.string())),
+    // Instagram: "facebook" = Unified login (Facebook Login for Business, graph.facebook.com);
+    // unset = Instagram login (graph.instagram.com, older apps).
+    via: v.optional(v.string()),
+    // Profile numbers from the last sync (Socials page).
+    profile: v.optional(
+      v.object({
+        followers: v.optional(v.number()),
+        following: v.optional(v.number()),
+        videoCount: v.optional(v.number()),
+        totalViews: v.optional(v.number()),
+        totalLikes: v.optional(v.number()),
+      })
+    ),
+    syncedAt: v.optional(v.number()),
+    syncError: v.optional(v.union(v.string(), v.null())),
+    status: v.union(v.literal("active"), v.literal("expired"), v.literal("revoked")),
+    lastError: v.optional(v.union(v.string(), v.null())),
+    connectedAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_user", ["userId", "platform"])
+    .index("by_external", ["platform", "externalId"])
+    .index("by_expiry", ["status", "tokenExpiresAt"]),
+
+  // OAuth "state" for a connect in progress (10 min).
+  socialConnects: defineTable({
+    state: v.string(),
+    userId: v.string(),
+    platform: v.string(),
+    returnTo: v.string(), // app origin to send the browser back to
+    codeVerifier: v.optional(v.string()), // PKCE (TikTok)
+    createdAt: v.number(),
+  }).index("by_state", ["state"]),
+
+  // One post of one video to one account.
+  socialPosts: defineTable({
+    userId: v.string(),
+    accountId: v.id("socialAccounts"),
+    platform: v.string(),
+    sourceType: v.union(v.literal("story"), v.literal("clip")),
+    sourceId: v.string(),
+    title: v.string(), // video title (YouTube) / label in the app
+    caption: v.string(),
+    privacy: v.optional(v.string()), // platform-specific (e.g. youtube public/unlisted/private)
+    aiLabel: v.optional(v.boolean()), // disclose AI-generated / synthetic content where supported
+    // TikTok post settings (chosen in the Post dialog, per TikTok's posting rules).
+    tiktok: v.optional(
+      v.object({
+        disableComment: v.boolean(),
+        disableDuet: v.boolean(),
+        disableStitch: v.boolean(),
+        brandOrganic: v.boolean(), // promoting your own business
+        brandContent: v.boolean(), // paid partnership / branded content
+      })
+    ),
+    scheduledAt: v.optional(v.number()),
+    status: v.union(
+      v.literal("scheduled"),
+      v.literal("queued"),
+      v.literal("posting"),
+      v.literal("published"),
+      v.literal("failed")
+    ),
+    step: v.optional(v.string()), // live progress text
+    containerId: v.optional(v.string()), // platform upload/container id while processing
+    platformPostId: v.optional(v.string()),
+    url: v.optional(v.string()),
+    error: v.optional(v.union(v.string(), v.null())),
+    publishedAt: v.optional(v.number()),
+    // Latest stats (history in socialStats).
+    stats: v.optional(
+      v.object({
+        views: v.optional(v.number()),
+        likes: v.optional(v.number()),
+        comments: v.optional(v.number()),
+        shares: v.optional(v.number()),
+        saves: v.optional(v.number()),
+        reach: v.optional(v.number()),
+        avgWatchSec: v.optional(v.number()),
+      })
+    ),
+    statsAt: v.optional(v.number()),
+    createdAt: v.number(),
+  })
+    .index("by_user", ["userId", "createdAt"])
+    .index("by_status", ["status", "scheduledAt"])
+    .index("by_source", ["sourceType", "sourceId"])
+    .index("by_stats", ["status", "statsAt"]),
+
+  // Recent videos on each connected account (all of them, not only ones
+  // posted from VidoScript), refreshed by socialNode.syncAccount.
+  socialMedia: defineTable({
+    accountId: v.id("socialAccounts"),
+    userId: v.string(),
+    platform: v.string(),
+    externalId: v.string(),
+    title: v.string(),
+    thumbnailUrl: v.optional(v.string()),
+    url: v.optional(v.string()),
+    publishedAt: v.number(),
+    durationSec: v.optional(v.number()),
+    kind: v.optional(v.string()), // reel / short / video / image / carousel
+    views: v.optional(v.number()),
+    likes: v.optional(v.number()),
+    comments: v.optional(v.number()),
+    shares: v.optional(v.number()),
+    updatedAt: v.number(),
+  })
+    .index("by_account", ["accountId", "publishedAt"])
+    .index("by_external", ["accountId", "externalId"]),
+
+  // Stats snapshots over time (for charts and the learning loop).
+  socialStats: defineTable({
+    postId: v.id("socialPosts"),
+    at: v.number(),
+    views: v.optional(v.number()),
+    likes: v.optional(v.number()),
+    comments: v.optional(v.number()),
+    shares: v.optional(v.number()),
+    saves: v.optional(v.number()),
+    reach: v.optional(v.number()),
+    avgWatchSec: v.optional(v.number()),
+  }).index("by_post", ["postId", "at"]),
 
   // One queue for every story step; the worker claims jobs by kind.
   storyJobs: defineTable({
     storyId: v.id("stories"),
     userId: v.string(),
-    kind: v.union(v.literal("script"), v.literal("plan"), v.literal("ref"), v.literal("still"), v.literal("voice"), v.literal("video"), v.literal("render")),
+    kind: v.union(v.literal("script"), v.literal("line"), v.literal("piece"), v.literal("plan"), v.literal("ref"), v.literal("still"), v.literal("voice"), v.literal("video"), v.literal("render")),
     targetId: v.optional(v.string()), // shot id, or "character:<id>" / "location:<id>"
     input: v.optional(v.string()), // e.g. rewrite notes
     status: v.union(v.literal("queued"), v.literal("working"), v.literal("done"), v.literal("failed")),

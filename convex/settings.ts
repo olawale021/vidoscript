@@ -17,6 +17,7 @@ export const SETTINGS_DEFAULTS = {
   defaultDownloadQuality: "720" as "360" | "480" | "720" | "1080",
   discoverWindowDays: 7,
   discoverLanguage: "en" as "en" | "any",
+  defaultTextAi: "openai" as "openai" | "gemini",
 };
 export const DISCOVER_WINDOWS = [7, 30, 90, 365];
 
@@ -31,7 +32,9 @@ async function requireUser(ctx: { auth: QueryCtx["auth"] }) {
 export const get = query({
   args: {},
   handler: async (ctx) => {
-    const userId = await requireUser(ctx);
+    // null while auth is still loading (e.g. right after an OAuth redirect).
+    const userId = (await ctx.auth.getUserIdentity())?.subject;
+    if (!userId) return null;
     const row = await ctx.db
       .query("userSettings")
       .withIndex("by_user", (q) => q.eq("userId", userId))
@@ -48,6 +51,7 @@ export const get = query({
       niches: row?.niches ?? [],
       discoverWindowDays: row?.discoverWindowDays ?? SETTINGS_DEFAULTS.discoverWindowDays,
       discoverLanguage: row?.discoverLanguage ?? SETTINGS_DEFAULTS.discoverLanguage,
+      defaultTextAi: row?.defaultTextAi ?? SETTINGS_DEFAULTS.defaultTextAi,
       updatedAt: row?.updatedAt ?? null,
     };
   },
@@ -68,6 +72,7 @@ export const update = mutation({
     niches: v.optional(v.array(v.string())),
     discoverWindowDays: v.optional(v.number()),
     discoverLanguage: v.optional(v.union(v.literal("en"), v.literal("any"))),
+    defaultTextAi: v.optional(v.union(v.literal("openai"), v.literal("gemini"))),
   },
   handler: async (ctx, args) => {
     const userId = await requireUser(ctx);
@@ -104,7 +109,8 @@ export const update = mutation({
 export const learningCounts = query({
   args: {},
   handler: async (ctx) => {
-    const userId = await requireUser(ctx);
+    const userId = (await ctx.auth.getUserIdentity())?.subject;
+    if (!userId) return null;
     const rated = await ctx.db
       .query("clips")
       .withIndex("by_user_rated", (q) => q.eq("userId", userId).gte("ratedAt", 0))

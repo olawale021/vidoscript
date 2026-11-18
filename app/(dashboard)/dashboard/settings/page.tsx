@@ -7,12 +7,12 @@ import { useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "@/convex/_generated/api";
 import { Panel, PanelBody, PanelHeader, Segmented } from "@/components/ui/kit";
-import { STORY_LENGTHS, STORY_VOICES } from "@/types/story";
+import { STORY_LENGTHS, STORY_VOICES, TEXT_AIS } from "@/types/story";
 import { SCOUT_NICHES } from "@/convex/scoutLib";
 import { Plus, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-type Settings = FunctionReturnType<typeof api.settings.get>;
+type Settings = NonNullable<FunctionReturnType<typeof api.settings.get>>;
 type Patch = Partial<Omit<Settings, "updatedAt">>;
 
 function Row({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
@@ -47,7 +47,7 @@ function Defaults() {
   const timer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(timer.current), []);
 
-  if (server === undefined) {
+  if (!server) {
     return (
       <Panel>
         <PanelHeader title="Defaults" />
@@ -101,6 +101,15 @@ function Defaults() {
                 </option>
               ))}
             </select>
+          </Row>
+          <Row label="Writing AI" hint="Writes scripts and shot plans, and does AI rewrites. You can change it per story.">
+            <Segmented
+              label="Writing AI"
+              className="max-w-xs"
+              value={s.defaultTextAi}
+              onChange={(v) => save({ defaultTextAi: v as "openai" | "gemini" })}
+              options={TEXT_AIS.map((x) => ({ value: x.id, label: x.id === "openai" ? "OpenAI GPT-5.5" : "Gemini Flash" }))}
+            />
           </Row>
           <Row label="Format">
             <Segmented
@@ -346,6 +355,104 @@ function Niches() {
   );
 }
 
+const SOCIAL: { id: "instagram" | "youtube" | "tiktok"; label: string; note: string }[] = [
+  { id: "instagram", label: "Instagram", note: "Post Reels to a professional (Business or Creator) account." },
+  { id: "youtube", label: "YouTube", note: "Post Shorts to your channel." },
+  { id: "tiktok", label: "TikTok", note: "Post to your TikTok." },
+];
+
+// Connected social accounts (direct platform APIs). The platform sends the
+// browser back here with ?social=connected|error after signing in.
+function ConnectedAccounts() {
+  const data = useQuery(api.social.accounts);
+  const startConnect = useMutation(api.social.startConnect);
+  const disconnect = useMutation(api.social.disconnect);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
+
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search);
+    const result = q.get("social");
+    if (!result) return;
+    const name = SOCIAL.find((s) => s.id === q.get("platform"))?.label ?? "Account";
+    setNotice(result === "connected" ? { ok: true, text: `${name} connected.` } : { ok: false, text: q.get("message") || `Couldn't connect ${name}.` });
+    window.history.replaceState(null, "", "/dashboard/settings#connected-accounts");
+  }, []);
+
+  const connect = async (platform: "instagram" | "youtube" | "tiktok") => {
+    setBusy(platform);
+    setNotice(null);
+    try {
+      window.location.href = await startConnect({ platform, origin: window.location.origin });
+    } catch (e) {
+      setNotice({ ok: false, text: e instanceof Error ? e.message.replace(/^.*Uncaught Error: /, "").split("\n")[0] : String(e) });
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div id="connected-accounts" className="scroll-mt-6">
+      <Panel>
+        <PanelHeader title="Connected accounts" />
+        <PanelBody className="grid gap-3">
+          <p className="text-sm text-muted">Post finished videos straight to your accounts and track how they do.</p>
+          {notice && <p className={cn("rounded-lg px-3 py-2 text-sm", notice.ok ? "bg-ok/10 text-ok" : "bg-bad/10 text-bad")}>{notice.text}</p>}
+          {data === undefined ? (
+            <div className="h-24 animate-pulse rounded-lg bg-surface-2" />
+          ) : (
+            <ul className="grid gap-2">
+              {SOCIAL.map((p) => {
+                const accs = (data?.accounts ?? []).filter((a) => a.platform === p.id);
+                const ready = data?.configured[p.id];
+                return (
+                  <li key={p.id} className="grid gap-2 rounded-[10px] border border-line p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold">{p.label}</div>
+                        <div className="text-xs text-faint">{ready ? p.note : "Coming soon"}</div>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={!ready || busy !== null}
+                        onClick={() => connect(p.id)}
+                        className="inline-flex h-9 items-center gap-1.5 rounded-[9px] border border-line-strong px-3 text-sm text-fg transition hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {busy === p.id ? "Opening…" : accs.length ? <><Plus size={14} /> Add another</> : <><Plus size={14} /> Connect</>}
+                      </button>
+                    </div>
+                    {accs.map((a) => (
+                      <div key={a._id} className="flex flex-wrap items-center gap-2.5 border-t border-line pt-2 text-sm">
+                        {a.avatarUrl ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src={a.avatarUrl} alt="" className="h-7 w-7 rounded-full" />
+                        ) : null}
+                        <span className="font-medium">@{a.handle}</span>
+                        {a.status === "active" ? (
+                          <span className="text-xs text-ok">Connected</span>
+                        ) : (
+                          <span className="text-xs text-bad">Sign-in expired. Reconnect.</span>
+                        )}
+                        {a.lastError && a.status === "active" && <span className="text-xs text-accent">{a.lastError}</span>}
+                        <button
+                          type="button"
+                          onClick={() => window.confirm(`Disconnect @${a.handle}? Posts already made stay online.`) && disconnect({ accountId: a._id })}
+                          className="ml-auto inline-flex min-h-8 items-center gap-1 px-1 text-xs text-faint hover:text-bad"
+                        >
+                          <X size={12} /> Disconnect
+                        </button>
+                      </div>
+                    ))}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </PanelBody>
+      </Panel>
+    </div>
+  );
+}
+
 function Learning() {
   const counts = useQuery(api.settings.learningCounts);
   const reset = useMutation(api.settings.resetLearning);
@@ -444,6 +551,7 @@ export default function SettingsPage() {
       </div>
       <Defaults />
       <Niches />
+      <ConnectedAccounts />
       <Learning />
       <Panel className="overflow-hidden">
         <PanelHeader title="Account" />

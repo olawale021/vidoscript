@@ -1,4 +1,5 @@
 import { v } from "convex/values";
+import { joinScript, pushScriptHistory, splitScript } from "./scriptLines";
 import { mutation, type MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { r2, SIX_HOURS, storagePrefix } from "./r2";
@@ -25,7 +26,7 @@ import {
 const STALE_MS = 15 * 60 * 1000;
 const MAX_ATTEMPTS = 3;
 const CAMERAS = ["push_in", "pull_out", "pan_left", "pan_right", "static"];
-const kindV = v.union(v.literal("script"), v.literal("plan"), v.literal("ref"), v.literal("still"), v.literal("voice"), v.literal("video"), v.literal("render"));
+const kindV = v.union(v.literal("script"), v.literal("line"), v.literal("piece"), v.literal("plan"), v.literal("ref"), v.literal("still"), v.literal("voice"), v.literal("video"), v.literal("render"));
 
 const signed = (key: string | null | undefined) => (key ? r2.getUrl(key, { expiresIn: SIX_HOURS }) : Promise.resolve(null));
 
@@ -71,8 +72,28 @@ function castOf(bible: StoryBible | null) {
   };
 }
 
+// The current plan as text, for "Re-plan with notes".
+async function currentPlanText(ctx: MutationCtx, story: Doc<"stories">, bible: StoryBible) {
+  const shots = await ctx.db.query("storyShots").withIndex("by_story", (q) => q.eq("storyId", story._id)).collect();
+  shots.sort((a, b) => a.order - b.order);
+  return [
+    "Characters:",
+    ...bible.characters.map((c) => `- id "${c.id}" · ${c.name} · voice ${c.voice}: ${c.look}`),
+    "Locations:",
+    ...bible.locations.map((l) => `- id "${l.id}" · ${l.name}: ${l.look}`),
+    "Shots:",
+    ...shots.map(
+      (s, i) =>
+        `${i + 1}. speaker ${s.speaker} · characters [${s.characters.join(", ")}] · location ${s.location ?? "none"} · ${s.camera}\n   says: ${s.narration}\n   picture: ${s.imagePrompt}`
+    ),
+  ].join("\n");
+}
+
 // Build what the worker needs for one job. Returns null when the target is gone.
 async function payload(ctx: MutationCtx, job: Doc<"storyJobs">, story: Doc<"stories">) {
+  const settings = story.textAi
+    ? null
+    : await ctx.db.query("userSettings").withIndex("by_user", (q) => q.eq("userId", story.userId)).first();
   const base = {
     jobId: job._id,
     kind: job.kind,
@@ -80,6 +101,7 @@ async function payload(ctx: MutationCtx, job: Doc<"storyJobs">, story: Doc<"stor
     userId: story.userId,
     aspect: story.aspect,
     style: styleText(story),
+    textAi: story.textAi ?? settings?.defaultTextAi ?? "openai",
   };
   const bible = (story.bible ?? null) as StoryBible | null;
 
@@ -94,6 +116,20 @@ async function payload(ctx: MutationCtx, job: Doc<"storyJobs">, story: Doc<"stor
       prefs: await prefsFor(ctx, story.userId, ["script", "video"]),
     };
   }
+  if (job.kind === "line") {
+    const { lines } = splitScript(story.script ?? "");
+    const index = Number(job.targetId);
+    if (!lines[index]) return null;
+    return {
+      ...base,
+      idea: story.idea,
+      script: story.script ?? "",
+      index,
+      line: lines[index],
+      note: job.input ?? null,
+      prefs: await prefsFor(ctx, story.userId, ["script"]),
+    };
+  }
   if (job.kind === "plan") {
     return {
       ...base,
@@ -103,6 +139,30 @@ async function payload(ctx: MutationCtx, job: Doc<"storyJobs">, story: Doc<"stor
       narratorVoice: story.narratorVoice,
       cast: castOf(bible),
       prefs: await prefsFor(ctx, story.userId, ["plan", "video"]),
+      // Re-plan with notes: revise the current plan instead of starting over.
+      notes: job.input ?? null,
+      currentPlan: job.input && bible ? await currentPlanText(ctx, story, bible) : null,
+    };
+  }
+  if (job.kind === "piece") {
+    const [kind, id] = (job.targetId ?? "").split(":");
+    const shot = kind === "shot" ? await ctx.db.get(id as Id<"storyShots">) : null;
+    const entry =
+      kind === "character" ? bible?.characters.find((c) => c.id === id) : kind === "location" ? bible?.locations.find((l) => l.id === id) : null;
+    if (kind === "shot" ? !shot || shot.storyId !== story._id : !entry) return null;
+    return {
+      ...base,
+      idea: story.idea,
+      script: story.script ?? "",
+      pieceKind: kind,
+      text: shot ? shot.imagePrompt : entry!.look,
+      name: entry?.name ?? null,
+      narration: shot?.narration ?? null,
+      shotCharacters: shot
+        ? (bible?.characters ?? []).filter((c) => shot.characters.includes(c.id)).map((c) => ({ name: c.name, look: c.look }))
+        : [],
+      shotLocation: shot?.location ? (bible?.locations.find((l) => l.id === shot.location) ?? null) : null,
+      note: job.input ?? null,
     };
   }
   if (job.kind === "ref") {
@@ -147,6 +207,7 @@ async function payload(ctx: MutationCtx, job: Doc<"storyJobs">, story: Doc<"stor
         text: shot.narration,
         voice: speaker?.voice ?? story.narratorVoice,
         speakerName: speaker?.name ?? null,
+        speakerLook: speaker?.look ?? null,
         prefs: await prefsFor(ctx, story.userId, ["voice"]),
       };
     }
@@ -163,6 +224,7 @@ async function payload(ctx: MutationCtx, job: Doc<"storyJobs">, story: Doc<"stor
       camera: shot.camera,
       narration: shot.narration,
       characters: chars,
+      castNames: (bible?.characters ?? []).map((c) => c.name), // image prompts swap these for "Person A/B…"
       location: loc ? { id: loc.id, name: loc.name, look: loc.look, refUrl: await signed(loc.refKey) } : null,
       prefs: await prefsFor(ctx, story.userId, ["still"]),
     };
@@ -213,6 +275,10 @@ async function markTarget(ctx: MutationCtx, job: Doc<"storyJobs">, status: strin
       renderStatus: status === "working" ? "rendering" : status === "failed" ? "failed" : "queued",
       renderError: error,
     });
+  } else if (status === "failed" && job.kind === "piece") {
+    await ctx.db.patch(job.storyId, { error: `The AI rewrite failed: ${error}` });
+  } else if (status === "failed" && job.kind === "line") {
+    await ctx.db.patch(job.storyId, { error: `Rewriting line ${Number(job.targetId) + 1} failed: ${error}` });
   } else if (status === "failed") {
     await ctx.db.patch(job.storyId, { error: `${job.kind === "script" ? "Writing the script" : "Planning the shots"} failed: ${error}` });
   }
@@ -291,7 +357,9 @@ export const saveScript = mutation({
   handler: async (ctx, { secret, jobId, title, hook, script, costUsd }) => {
     assertWorker(secret);
     const job = await finish(ctx, jobId);
-    if (!job || !(await ctx.db.get(job.storyId))) return null;
+    const story = job && (await ctx.db.get(job.storyId));
+    if (!job || !story) return null;
+    await pushScriptHistory(ctx, story, "AI rewrite");
     await ctx.db.patch(job.storyId, {
       title: title.slice(0, 120),
       hook: hook.slice(0, 200),
@@ -300,6 +368,52 @@ export const saveScript = mutation({
       updatedAt: Date.now(),
     });
     await addCost(ctx, job.storyId, costUsd);
+    return null;
+  },
+});
+
+// A rewritten picture description (shot) or look (character / location).
+export const savePiece = mutation({
+  args: { secret: v.string(), jobId: v.id("storyJobs"), text: v.string(), costUsd: v.number() },
+  handler: async (ctx, { secret, jobId, text, costUsd }) => {
+    assertWorker(secret);
+    const job = await finish(ctx, jobId);
+    const story = job && (await ctx.db.get(job.storyId));
+    if (!job || !story || !text.trim()) return null;
+    const [kind, id] = (job.targetId ?? "").split(":");
+    if (kind === "shot") {
+      const shot = await ctx.db.get(id as Id<"storyShots">);
+      if (shot && shot.storyId === story._id) await ctx.db.patch(shot._id, { imagePrompt: text.trim().slice(0, 1500) });
+    } else {
+      const bible = story.bible as StoryBible | undefined;
+      const entry = kind === "character" ? bible?.characters.find((c) => c.id === id) : bible?.locations.find((l) => l.id === id);
+      if (entry && bible) {
+        entry.look = text.trim().slice(0, 800);
+        await ctx.db.patch(story._id, { bible });
+      }
+    }
+    await ctx.db.patch(story._id, { error: null, updatedAt: Date.now() });
+    await addCost(ctx, story._id, costUsd);
+    return null;
+  },
+});
+
+// One rewritten line. Replaces it by position, unless the script changed so
+// much that the line is gone.
+export const saveLine = mutation({
+  args: { secret: v.string(), jobId: v.id("storyJobs"), index: v.number(), text: v.string(), costUsd: v.number() },
+  handler: async (ctx, { secret, jobId, index, text, costUsd }) => {
+    assertWorker(secret);
+    const job = await finish(ctx, jobId);
+    const story = job && (await ctx.db.get(job.storyId));
+    if (!job || !story) return null;
+    const parts = splitScript(story.script ?? "");
+    if (parts.lines[index] && text.trim()) {
+      await pushScriptHistory(ctx, story, `AI rewrite of line ${index + 1}`);
+      parts.lines[index] = { ...parts.lines[index], text: text.replace(/\s+/g, " ").trim().slice(0, 600) };
+      await ctx.db.patch(story._id, { script: joinScript(parts).slice(0, 20_000), error: null, updatedAt: Date.now() });
+    }
+    await addCost(ctx, story._id, costUsd);
     return null;
   },
 });

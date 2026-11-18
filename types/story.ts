@@ -7,7 +7,7 @@ export type StoryAspect = "9:16" | "16:9";
 export type StoryStep = "script" | "plan" | "cast" | "board" | "export";
 export type CameraMove = "push_in" | "pull_out" | "pan_left" | "pan_right" | "static";
 export type ItemStatus = "none" | "queued" | "working" | "ready" | "failed";
-export type StoryJobKind = "script" | "plan" | "ref" | "still" | "voice" | "video" | "render";
+export type StoryJobKind = "script" | "line" | "piece" | "plan" | "ref" | "still" | "voice" | "video" | "render";
 
 export const STORY_STEPS: { id: StoryStep; label: string }[] = [
   { id: "script", label: "Script" },
@@ -256,3 +256,10 @@ export const STORY_MUSIC: { id: string; title: string; mood: MusicMood; license:
 
 export const MUSIC_KEY = (id: string) => `shared/music/${id}.mp3`;
 export const DEFAULT_MUSIC_VOLUME = 0.12;
+
+// Which AI writes text (script, line rewrites, plan, plan rewrites).
+export type TextAi = "openai" | "gemini";
+export const TEXT_AIS: { id: TextAi; label: string; note: string }[] = [
+  { id: "openai", label: "OpenAI GPT-5.5", note: "Best writing, about $0.05–0.10 a script" },
+  { id: "gemini", label: "Gemini 2.5 Flash", note: "Fast and very cheap, under a cent" },
+];

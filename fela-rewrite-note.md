@@ -1,0 +1,1 @@
+Keep Baba Tunde speaking every line, warm and nostalgic. Make the timeline clear: first the night he saw Fela at the Shrine in the 1970s; then "In 1977, a thousand soldiers stormed Kalakuta and burned it down, and threw his mother from a window"; then the 1997 funeral. Explain Kalakuta as Fela's home that he declared free from the government. Hook: "The night I saw Fela play".

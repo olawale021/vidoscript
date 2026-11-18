@@ -17,6 +17,7 @@ import {
   Plus,
   Scissors,
   Search,
+  Send,
   Settings,
   Shield,
   X,
@@ -49,6 +50,7 @@ function useNav() {
       label: "Library",
       items: [
         { href: "/dashboard/library", icon: Clapperboard, label: "Saved videos" },
+        { href: "/dashboard/socials", icon: Send, label: "Socials" },
         { href: "/dashboard/ideas", icon: Lightbulb, label: "Idea bank" },
         { href: "/dashboard/style", icon: Feather, label: "Style bank" },
       ],

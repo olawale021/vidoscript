@@ -272,7 +272,7 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 // ── Story Studio jobs (render-worker/story.mjs) ──
 // AI steps (script, plan, images, voice) run in two background lanes so a long
 // export never blocks them; story exports run in the main loop like clip exports.
-const STORY_AI_KINDS = ["script", "plan", "ref", "still", "voice"];
+const STORY_AI_KINDS = ["script", "line", "piece", "plan", "ref", "still", "voice"];
 
 async function processStoryJob(kinds) {
   const job = await convex.mutation(api.storyWorker.claimJob, { secret: SECRET, kinds });

@@ -1,7 +1,8 @@
 import { v } from "convex/values";
+import { joinScript, pushScriptHistory, splitScript } from "./scriptLines";
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
-import { downloadUrl, r2, safeFileName, SIX_HOURS } from "./r2";
+import { downloadUrl, r2, safeFileName, SIX_HOURS, storagePrefix } from "./r2";
 import type { StoryBible, StoryJobKind } from "../types/story";
 import { MUSIC_KEY, STORY_MUSIC, STORY_STYLES, VIDEO_MODEL_IDS, VOICE_IDS, isTalking, type StoryVideoModel } from "../types/story";
 import { recordImplicit } from "./storyFeedback";
@@ -128,13 +129,19 @@ export const get = query({
       ...(await ctx.db.query("storyJobs").withIndex("by_story", (q) => q.eq("storyId", storyId).eq("status", "queued")).collect()),
       ...(await ctx.db.query("storyJobs").withIndex("by_story", (q) => q.eq("storyId", storyId).eq("status", "working")).collect()),
     ];
+    const textAiDefault = story.textAi
+      ? null
+      : (await ctx.db.query("userSettings").withIndex("by_user", (q) => q.eq("userId", story.userId)).first())?.defaultTextAi;
     return {
       ...story,
+      textAi: story.textAi ?? textAiDefault ?? "openai",
       bible,
       refUrls,
       shots,
       busy: {
         script: jobs.some((j) => j.kind === "script"),
+        lines: jobs.filter((j) => j.kind === "line").map((j) => Number(j.targetId)),
+        pieces: jobs.filter((j) => j.kind === "piece").map((j) => j.targetId ?? ""),
         plan: jobs.some((j) => j.kind === "plan"),
         refs: jobs.filter((j) => j.kind === "ref").length,
         stills: jobs.filter((j) => j.kind === "still").length,
@@ -189,7 +196,8 @@ export const create = mutation({
 export const updateScript = mutation({
   args: { storyId: v.id("stories"), script: v.string(), title: v.optional(v.string()), hook: v.optional(v.string()) },
   handler: async (ctx, { storyId, script, title, hook }) => {
-    await ownStory(ctx, storyId);
+    const story = await ownStory(ctx, storyId);
+    if (story.script !== script) await pushScriptHistory(ctx, story, "Your edits");
     await touch(ctx, storyId, {
       script: script.slice(0, 20_000),
       ...(title?.trim() ? { title: title.trim().slice(0, 120) } : {}),
@@ -220,6 +228,67 @@ export const rewriteScript = mutation({
   },
 });
 
+// One line: AI rewrite (worker job; targetId = line index, input = note).
+export const rewriteLine = mutation({
+  args: { storyId: v.id("stories"), index: v.number(), note: v.optional(v.string()) },
+  handler: async (ctx, { storyId, index, note }) => {
+    const story = await ownStory(ctx, storyId);
+    const { lines } = splitScript(story.script ?? "");
+    if (!Number.isInteger(index) || index < 0 || index >= lines.length) throw new Error("That line no longer exists.");
+    await enqueue(ctx, story, "line", String(index), note?.trim().slice(0, 500) || undefined);
+    if (note?.trim()) {
+      await recordImplicit(ctx, {
+        userId: story.userId,
+        storyId,
+        stage: "script",
+        rating: 0,
+        reasons: ["Asked for a rewrite"],
+        note: note.trim().slice(0, 300),
+        snapshot: `${lines[index].who}: ${lines[index].text}`.slice(0, 300),
+      });
+    }
+    return null;
+  },
+});
+
+// One line: your own edit (text and/or speaker), or delete it (text "").
+export const setLine = mutation({
+  args: { storyId: v.id("stories"), index: v.number(), text: v.string(), who: v.optional(v.string()) },
+  handler: async (ctx, { storyId, index, text, who }) => {
+    const story = await ownStory(ctx, storyId);
+    const parts = splitScript(story.script ?? "");
+    if (!Number.isInteger(index) || index < 0 || index >= parts.lines.length) throw new Error("That line no longer exists.");
+    await pushScriptHistory(ctx, story, text.trim() ? `Edited line ${index + 1}` : `Deleted line ${index + 1}`);
+    const clean = text.replace(/\s+/g, " ").trim().slice(0, 600);
+    if (clean) {
+      const speaker = who?.replace(/[^\w .'’()-]/g, "").trim().slice(0, 40);
+      parts.lines[index] = { who: speaker || parts.lines[index].who, text: clean };
+    } else {
+      parts.lines.splice(index, 1);
+    }
+    await touch(ctx, storyId, { script: joinScript(parts).slice(0, 20_000) });
+    return null;
+  },
+});
+
+// Undo: go back to the previous script version.
+export const undoScript = mutation({
+  args: { storyId: v.id("stories") },
+  handler: async (ctx, { storyId }) => {
+    const story = await ownStory(ctx, storyId);
+    const history = story.scriptHistory ?? [];
+    const prev = history[history.length - 1];
+    if (!prev) throw new Error("Nothing to undo.");
+    await touch(ctx, storyId, {
+      script: prev.script,
+      title: prev.title,
+      ...(prev.hook !== undefined ? { hook: prev.hook } : {}),
+      scriptHistory: history.slice(0, -1),
+    });
+    return prev.label;
+  },
+});
+
 export const confirmScript = mutation({
   args: { storyId: v.id("stories") },
   handler: async (ctx, { storyId }) => {
@@ -234,11 +303,45 @@ export const confirmScript = mutation({
 // ── Plan edits ──
 
 export const replan = mutation({
-  args: { storyId: v.id("stories") },
-  handler: async (ctx, { storyId }) => {
+  args: { storyId: v.id("stories"), notes: v.optional(v.string()) },
+  handler: async (ctx, { storyId, notes }) => {
     const story = await ownStory(ctx, storyId);
+    const clean = notes?.trim().slice(0, 1500) || undefined;
     await touch(ctx, storyId, { step: "plan", error: null });
-    await enqueue(ctx, story, "plan");
+    await enqueue(ctx, story, "plan", undefined, clean);
+    if (clean) {
+      await recordImplicit(ctx, {
+        userId: story.userId,
+        storyId,
+        stage: "plan",
+        rating: 0,
+        reasons: ["Asked for a re-plan"],
+        note: clean.slice(0, 300),
+        snapshot: `${story.title} · ${story.targetSec}s`,
+      });
+    }
+    return null;
+  },
+});
+
+// AI rewrite of one plan piece: "shot:<id>" (picture description) or
+// "character:<id>" / "location:<id>" (look).
+export const rewritePiece = mutation({
+  args: { storyId: v.id("stories"), target: v.string(), note: v.optional(v.string()) },
+  handler: async (ctx, { storyId, target, note }) => {
+    const story = await ownStory(ctx, storyId);
+    if (!/^(shot|character|location):.+/.test(target)) throw new Error("Unknown item");
+    await enqueue(ctx, story, "piece", target, note?.trim().slice(0, 500) || undefined);
+    return null;
+  },
+});
+
+// Which AI writes this story's text.
+export const setTextAi = mutation({
+  args: { storyId: v.id("stories"), textAi: v.union(v.literal("openai"), v.literal("gemini")) },
+  handler: async (ctx, { storyId, textAi }) => {
+    await ownStory(ctx, storyId);
+    await touch(ctx, storyId, { textAi });
     return null;
   },
 });
@@ -405,6 +508,69 @@ export const redoRef = mutation({
     item.refError = null;
     await touch(ctx, storyId, { bible });
     await enqueue(ctx, story, "ref", `${kind}:${id}`);
+    return null;
+  },
+});
+
+// ── Your own photos (instead of an AI picture) ──
+
+const PHOTO_TYPES: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" };
+
+function parseTarget(target: string) {
+  const m = /^(shot|character|location):(.+)$/.exec(target);
+  if (!m) throw new Error("Unknown item");
+  return { kind: m[1] as "shot" | "character" | "location", id: m[2] };
+}
+
+// Upload URL for a photo that will become a shot's picture or a cast reference.
+export const photoUploadUrl = mutation({
+  args: { storyId: v.id("stories"), target: v.string(), contentType: v.string() },
+  handler: async (ctx, { storyId, target, contentType }) => {
+    const story = await ownStory(ctx, storyId);
+    const { kind } = parseTarget(target);
+    const ext = PHOTO_TYPES[contentType];
+    if (!ext) throw new Error("Use a JPG, PNG or WebP photo.");
+    const folder = kind === "shot" ? "stills" : "refs";
+    const key = `${storagePrefix()}/stories/${story.userId}/${story._id}/${folder}/upload-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const { url } = await r2.generateUploadUrl(key);
+    return { url, key };
+  },
+});
+
+// Use the uploaded photo: a shot's picture, or a character's / location's reference.
+export const usePhoto = mutation({
+  args: { storyId: v.id("stories"), target: v.string(), key: v.string(), rightsConfirmed: v.boolean() },
+  handler: async (ctx, { storyId, target, key, rightsConfirmed }) => {
+    const story = await ownStory(ctx, storyId);
+    if (!rightsConfirmed) throw new Error("Please confirm you own this photo or have permission to use it.");
+    if (!key.startsWith(`${storagePrefix()}/stories/${story.userId}/${story._id}/`) || !key.includes("/upload-")) throw new Error("Bad upload");
+    const { kind, id } = parseTarget(target);
+    // Drop any queued AI drawing of the same thing so it can't overwrite the photo.
+    const queued = await ctx.db
+      .query("storyJobs")
+      .withIndex("by_story", (q) => q.eq("storyId", storyId).eq("status", "queued"))
+      .collect();
+    for (const j of queued) {
+      if ((kind === "shot" && j.kind === "still" && j.targetId === id) || (kind !== "shot" && j.kind === "ref" && j.targetId === target)) {
+        await ctx.db.delete(j._id);
+      }
+    }
+    if (kind === "shot") {
+      const shot = await ctx.db.get(id as Id<"storyShots">);
+      if (!shot || shot.storyId !== storyId) throw new Error("Shot not found");
+      if (shot.stillKey && shot.stillKey !== key) await r2.deleteObject(ctx, shot.stillKey).catch(() => {});
+      await ctx.db.patch(shot._id, { stillKey: key, stillStatus: "ready", stillError: null, continuity: null });
+      await touch(ctx, storyId);
+    } else {
+      const bible = story.bible as StoryBible | undefined;
+      const item = (kind === "character" ? bible?.characters : bible?.locations)?.find((x) => x.id === id);
+      if (!bible || !item) throw new Error("Not found");
+      if (item.refKey && item.refKey !== key) await r2.deleteObject(ctx, item.refKey).catch(() => {});
+      item.refKey = key;
+      item.refStatus = "ready";
+      item.refError = null;
+      await touch(ctx, storyId, { bible });
+    }
     return null;
   },
 });
